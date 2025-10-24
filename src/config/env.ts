@@ -9,6 +9,8 @@ const EnvSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(32),
   ACCESS_EXPIRES_IN: z.string().default('15m'),
   REFRESH_EXPIRES_IN: z.string().default('7d'),
+  GITHUB_TOKEN: z.string().optional(),
+  GITLAB_TOKEN: z.string().optional(),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -17,3 +19,4 @@ if (!parsed.success) {
   process.exit(1);
 }
 export const env = parsed.data;
+

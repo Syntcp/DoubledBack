@@ -1,6 +1,3 @@
-// prisma/schema.prisma — Complet, aligné avec le schéma MySQL
-// Provider MySQL. Toutes les tables principales + relations + enums.
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -10,57 +7,80 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// =============================
-/// UTILISATEURS / RÔLES / PERMS
-/// =============================
+enum RepoProvider {
+  GITHUB
+  GITLAB
+  OTHER
+}
+
 model User {
   id           BigInt   @id @default(autoincrement())
   email        String   @unique @db.VarChar(191)
   fullName     String
   jobTitle     String?
-  isActive     Boolean  @default(true)
   passwordHash String
+  isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  roles             UserRole[]
-  tasks             Task[]              @relation("TaskAssignee")
-  timeLogs          TimeEntry[]
-  uploads           Attachment[]        @relation("AttachmentUploader")
-  createdDocs       Document[]          @relation("DocumentCreator")
-  notifications     Notification[]
-  activityLogs      ActivityLog[]       @relation("ActorLogs")
-  ProjectMember     ProjectMember[]
-  TaskComment       TaskComment[]
-  LeadStatusHistory LeadStatusHistory[]
+  roles         UserRole[]
+  refreshTokens RefreshToken[]
+  activityLogs  ActivityLog[] @relation("ActorLogs")
 
-  RefreshToken RefreshToken[]
+  Client Client[]
 }
 
-model RefreshToken {
-  id String @id @default(cuid())
-  userId BigInt
-  tokenHash String @unique @db.Char(64) //sha256 du token, pas le token en clair
-  expiresAt DateTime
-  revokedAt DateTime?
+model Client {
+  id        BigInt   @id @default(autoincrement())
+  fullName  String
+  email     String?  @db.VarChar(191)
+  phone     String?  @db.VarChar(32)
+  company   String?  @db.VarChar(191)
+  notes     String?
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ownerId BigInt?
+  owner   User? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
 
-  @@index([userId])
+  projects Project[]
+
+  @@index([ownerId])
+  @@index([email])
+}
+
+model Project {
+  id            BigInt       @id @default(autoincrement())
+  clientId      BigInt
+  client        Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  repoProvider  RepoProvider?
+  repoUrl       String?      @db.VarChar(255)
+  repoOwner     String?      @db.VarChar(100)
+  repoName      String?      @db.VarChar(100)
+  defaultBranch String?      @db.VarChar(64)
+  liveUrl       String?      @db.VarChar(255)
+  healthUrl     String?      @db.VarChar(255)
+  lastRepoPushAt DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([clientId])
 }
 
 model Role {
-  id          BigInt           @id @default(autoincrement())
-  name        String           @unique
+  id          BigInt   @id @default(autoincrement())
+  name        String   @unique @db.VarChar(191)
   description String?
   users       UserRole[]
   permissions RolePermission[]
 }
 
 model Permission {
-  id          BigInt           @id @default(autoincrement())
-  code        String           @unique
+  id          BigInt   @id @default(autoincrement())
+  code        String   @unique @db.VarChar(191)
   description String?
   roles       RolePermission[]
 }
@@ -68,10 +88,11 @@ model Permission {
 model UserRole {
   userId BigInt
   roleId BigInt
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([userId, roleId])
+  @@index([roleId])
 }
 
 model RolePermission {
@@ -81,455 +102,36 @@ model RolePermission {
   permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
 
   @@id([roleId, permissionId])
+  @@index([permissionId])
 }
 
-/// =============================
-/// CLIENTS / CONTACTS / ADRESSES
-/// =============================
-model ClientStatus {
-  id      BigInt   @id @default(autoincrement())
-  name    String   @unique
-  clients Client[]
-}
-
-model Client {
-  id        BigInt   @id @default(autoincrement())
-  name      String
-  website   String?
-  vatNumber String?
-  notes     String?
-  statusId  BigInt?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  status    ClientStatus?   @relation(fields: [statusId], references: [id])
-  contacts  ClientContact[]
-  addresses Address[]
-  projects  Project[]
-  documents Document[]
-  invoices  Invoice[]
-  Lead      Lead[]
-}
-
-model ClientContact {
-  id        BigInt   @id @default(autoincrement())
-  clientId  BigInt
-  fullName  String
-  email     String?
-  phone     String?
-  position  String?
-  isPrimary Boolean  @default(false)
-  createdAt DateTime @default(now())
-
-  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-
-  @@index([clientId])
-}
-
-model Address {
-  id          BigInt       @id @default(autoincrement())
-  clientId    BigInt?
-  addressType AddressType?
-  line1       String
-  line2       String?
-  city        String
-  postalCode  String
-  region      String?
-  countryCode String       @default("FR")
-
-  client Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
-
-  @@index([clientId])
-}
-
-enum AddressType {
-  billing
-  shipping
-  other
-}
-
-model ProjectStatus {
-  id       BigInt    @id @default(autoincrement())
-  name     String    @unique
-  projects Project[]
-}
-
-model Project {
-  id           BigInt        @id @default(autoincrement())
-  clientId     BigInt
-  name         String
-  description  String?
-  statusId     BigInt?
-  budgetAmount Decimal?
-  billingModel BillingModel?
-  startDate    DateTime?
-  dueDate      DateTime?
-  leadId       BigInt?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-
-  client Client         @relation(fields: [clientId], references: [id])
-  status ProjectStatus? @relation(fields: [statusId], references: [id])
-  lead   Lead?          @relation(fields: [leadId], references: [id])
-
-  members     ProjectMember[]
-  stages      ProjectStage[]
-  tasks       Task[]
-  timeLogs    TimeEntry[]
-  attachments Attachment[]
-  documents   Document[]
-  invoices    Invoice[]
-  expenses    Expense[]
-}
-
-enum BillingModel {
-  forfait
-  tjm
-  regie
-}
-
-model ProjectMember {
-  projectId  BigInt
+model RefreshToken {
+  id         String   @id @default(cuid())
   userId     BigInt
-  roleLabel  String?
-  hourlyRate Decimal?
-  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user       User     @relation(fields: [userId], references: [id])
-
-  @@id([projectId, userId])
-}
-
-model ProjectStage {
-  id           BigInt      @id @default(autoincrement())
-  projectId    BigInt
-  name         String
-  sortOrder    Int         @default(0)
-  plannedStart DateTime?
-  plannedEnd   DateTime?
-  status       StageStatus @default(todo)
-  project      Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tasks        Task[]
-
-  @@index([projectId])
-}
-
-enum StageStatus {
-  todo
-  doing
-  done
-}
-
-model TaskPriority {
-  id    BigInt @id @default(autoincrement())
-  name  String @unique
-  tasks Task[]
-}
-
-model TaskStatus {
-  id    BigInt @id @default(autoincrement())
-  name  String @unique
-  tasks Task[]
-}
-
-model Task {
-  id            BigInt    @id @default(autoincrement())
-  projectId     BigInt
-  stageId       BigInt?
-  title         String
-  description   String?
-  assigneeId    BigInt?
-  priorityId    BigInt?
-  statusId      BigInt?
-  dueDate       DateTime?
-  estimateHours Decimal?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  stage    ProjectStage? @relation(fields: [stageId], references: [id])
-  assignee User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
-  priority TaskPriority? @relation(fields: [priorityId], references: [id])
-  status   TaskStatus?   @relation(fields: [statusId], references: [id])
-
-  comments    TaskComment[]
-  attachments Attachment[]
-  timeLogs    TimeEntry[]
-
-  @@index([projectId])
-  @@index([assigneeId])
-}
-
-model TaskComment {
-  id        BigInt   @id @default(autoincrement())
-  taskId    BigInt
-  userId    BigInt
-  body      String
-  createdAt DateTime @default(now())
-
-  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id])
-}
-
-model Attachment {
-  id             BigInt   @id @default(autoincrement())
-  projectId      BigInt?
-  taskId         BigInt?
-  uploadedById   BigInt?
-  fileUrl        String
-  filename       String
-  contentType    String?
-  sizeBytes      BigInt?
-  checksumSha256 String?
-  createdAt      DateTime @default(now())
-
-  project  Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  task     Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  uploader User?    @relation("AttachmentUploader", fields: [uploadedById], references: [id])
-
-  @@index([projectId])
-  @@index([taskId])
-}
-
-model TimeEntry {
-  id         BigInt    @id @default(autoincrement())
-  userId     BigInt
-  projectId  BigInt
-  taskId     BigInt?
-  startedAt  DateTime
-  endedAt    DateTime?
-  billable   Boolean   @default(true)
-  hourlyRate Decimal?
-  notes      String?
-
-  user    User    @relation(fields: [userId], references: [id])
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  task    Task?   @relation(fields: [taskId], references: [id])
-
-  @@index([projectId])
-  @@index([userId])
-}
-
-model LeadSource {
-  id    BigInt @id @default(autoincrement())
-  name  String @unique
-  leads Lead[]
-}
-
-model LeadStatus {
-  id                BigInt              @id @default(autoincrement())
-  name              String              @unique
-  sortOrder         Int                 @default(0)
-  leads             Lead[]
-  LeadStatusHistory LeadStatusHistory[]
-}
-
-model Lead {
-  id           BigInt    @id @default(autoincrement())
-  clientId     BigInt?
-  contactName  String?
-  email        String?
-  phone        String?
-  sourceId     BigInt?
-  statusId     BigInt?
-  valueAmount  Decimal?
-  probability  Int?      @default(50)
-  nextActionAt DateTime?
-  notes        String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-
-  client   Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  source   LeadSource?         @relation(fields: [sourceId], references: [id])
-  status   LeadStatus?         @relation(fields: [statusId], references: [id])
-  projects Project[]
-  history  LeadStatusHistory[]
-}
-
-model LeadStatusHistory {
-  id        BigInt   @id @default(autoincrement())
-  leadId    BigInt
-  statusId  BigInt
-  changedBy BigInt?
-  changedAt DateTime @default(now())
-
-  lead   Lead       @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  status LeadStatus @relation(fields: [statusId], references: [id])
-  user   User?      @relation(fields: [changedBy], references: [id], onDelete: SetNull)
-}
-
-model InvoiceStatus {
-  id       BigInt    @id @default(autoincrement())
-  name     String    @unique
-  invoices Invoice[]
-}
-
-model Invoice {
-  id        BigInt    @id @default(autoincrement())
-  clientId  BigInt
-  projectId BigInt?
-  number    String    @unique
-  issueDate DateTime
-  dueDate   DateTime?
-  currency  String    @default("EUR")
-  subtotal  Decimal   @default(0)
-  taxTotal  Decimal   @default(0)
-  total     Decimal   @default(0)
-  statusId  BigInt?
-  notes     String?
-  createdAt DateTime  @default(now())
-
-  client   Client         @relation(fields: [clientId], references: [id])
-  project  Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  status   InvoiceStatus? @relation(fields: [statusId], references: [id])
-  items    InvoiceItem[]
-  payments Payment[]
-
-  @@index([clientId])
-}
-
-model InvoiceItem {
-  id          BigInt  @id @default(autoincrement())
-  invoiceId   BigInt
-  description String
-  quantity    Decimal @default(1)
-  unitPrice   Decimal @default(0)
-  taxRate     Decimal @default(0)
-
-  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-}
-
-model PaymentMethod {
-  id       BigInt    @id @default(autoincrement())
-  name     String    @unique
-  payments Payment[]
-}
-
-model Payment {
-  id        BigInt   @id @default(autoincrement())
-  invoiceId BigInt
-  amount    Decimal
-  paidAt    DateTime
-  methodId  BigInt?
-  reference String?
-
-  invoice Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  method  PaymentMethod? @relation(fields: [methodId], references: [id])
-
-  @@index([invoiceId])
-}
-
-model Vendor {
-  id       BigInt    @id @default(autoincrement())
-  name     String
-  email    String?
-  phone    String?
-  website  String?
-  notes    String?
-  expenses Expense[]
-}
-
-model Expense {
-  id          BigInt   @id @default(autoincrement())
-  projectId   BigInt?
-  vendorId    BigInt?
-  description String
-  amount      Decimal
-  expenseDate DateTime
-  category    String?
-  receiptUrl  String?
-
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  vendor  Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull)
-}
-
-model Document {
-  id         BigInt   @id @default(autoincrement())
-  clientId   BigInt?
-  projectId  BigInt?
-  docType    String?
-  title      String
-  storageUrl String
-  createdBy  BigInt?
+  tokenHash  String   @unique @db.Char(64) // SHA-256 hex du refresh token
+  expiresAt  DateTime
+  revokedAt  DateTime?
   createdAt  DateTime @default(now())
 
-  client  Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  creator User?    @relation("DocumentCreator", fields: [createdBy], references: [id], onDelete: SetNull)
-}
-
-model Template {
-  id         BigInt  @id @default(autoincrement())
-  category   String?
-  name       String
-  contentMd  String?
-  storageUrl String?
-}
-
-model Automation {
-  id        BigInt         @id @default(autoincrement())
-  name      String
-  kind      AutomationKind
-  isActive  Boolean        @default(true)
-  config    Json
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-}
-
-enum AutomationKind {
-  cron
-  event
-  manual
-}
-
-model Webhook {
-  id        BigInt   @id @default(autoincrement())
-  name      String
-  event     String
-  targetUrl String
-  secret    String?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-}
-
-model Notification {
-  id        BigInt    @id @default(autoincrement())
-  userId    BigInt
-  kind      String
-  payload   Json
-  readAt    DateTime?
-  createdAt DateTime  @default(now())
-
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model ActivityLog {
   id          BigInt   @id @default(autoincrement())
   actorUserId BigInt?
-  entityType  String
-  entityId    BigInt
-  action      String
+  entityType  String   @db.VarChar(64) // "user","role","permission", etc.
+  entityId    BigInt?
+  action      String   @db.VarChar(64) // "create","update","delete","login","logout"
+  ip          String?  @db.VarChar(64)
+  userAgent   String?
   metadata    Json
   createdAt   DateTime @default(now())
 
   actor User? @relation("ActorLogs", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([entityType, entityId])
-}
-
-model Tag {
-  id     BigInt    @id @default(autoincrement())
-  name   String    @unique
-  tagged Tagging[]
-}
-
-model Tagging {
-  id         BigInt   @id @default(autoincrement())
-  tagId      BigInt
-  entityType String
-  entityId   BigInt
-  createdAt  DateTime @default(now())
-
-  tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
-
-  @@index([entityType, entityId])
+  @@index([createdAt])
 }
