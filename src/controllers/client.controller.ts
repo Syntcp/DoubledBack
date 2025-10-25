@@ -3,6 +3,7 @@ import type { AuthRequest } from '../middleware/auth.js';
 import { createClientSchema, updateClientSchema, clientIdParamSchema, listClientsQuerySchema } from '../schemas/client.schema.js';
 import { createClient, deleteClient, getClient, listClients, updateClient } from '../services/client.services.js';
 import { listProjectsByClient } from '../services/project.services.js';
+import { clientInvoiceSummary } from '../services/invoice.services.js';
 
 export async function list(req: AuthRequest, res: Response) {
   const q = listClientsQuerySchema.parse(req.query);
@@ -13,8 +14,11 @@ export async function list(req: AuthRequest, res: Response) {
 export async function getOne(req: AuthRequest, res: Response) {
   const { id } = clientIdParamSchema.parse(req.params);
   const client = await getClient(req.user!.id, id);
-  const projects = await listProjectsByClient(req.user!.id, id, { includeMeta: true });
-  res.json({ ...client, projects });
+  const [projects, invoices] = await Promise.all([
+    listProjectsByClient(req.user!.id, id, { includeMeta: true }),
+    clientInvoiceSummary(req.user!.id, id),
+  ]);
+  res.json({ ...client, projects, invoices });
 }
 
 export async function create(req: AuthRequest, res: Response) {

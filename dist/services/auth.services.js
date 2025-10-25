@@ -10,6 +10,7 @@ const jwt_js_1 = require("../lib/jwt.js");
 const crypto_js_1 = require("../lib/crypto.js");
 const env_js_1 = require("../config/env.js");
 const node_crypto_1 = require("node:crypto");
+
 async function registerUser(input) {
     const exists = await prisma_js_1.prisma.user.findUnique({ where: { email: input.email } });
     if (exists)
@@ -21,6 +22,7 @@ async function registerUser(input) {
     const tokens = await issueTokens(user.id);
     return { user: publicUser(user), ...tokens };
 }
+
 async function loginUser(input) {
     const user = await prisma_js_1.prisma.user.findUnique({ where: { email: input.email } });
     if (!user)
@@ -31,6 +33,7 @@ async function loginUser(input) {
     const tokens = await issueTokens(user.id);
     return { user: publicUser(user), ...tokens };
 }
+
 async function refreshTokens(oldRefreshToken) {
     const hashed = (0, crypto_js_1.sha256)(oldRefreshToken);
     const db = await prisma_js_1.prisma.refreshToken.findUnique({ where: { tokenHash: hashed } });
@@ -44,6 +47,7 @@ async function refreshTokens(oldRefreshToken) {
     const tokens = await issueTokens(db.userId);
     return tokens;
 }
+
 async function logout(refreshToken) {
     const hashed = (0, crypto_js_1.sha256)(refreshToken);
     await prisma_js_1.prisma.refreshToken.updateMany({
@@ -51,22 +55,37 @@ async function logout(refreshToken) {
         data: { revokedAt: new Date() },
     });
 }
+
 function publicUser(u) {
     return { id: Number(u.id), email: u.email, fullName: u.fullName };
 }
+
 async function issueTokens(userId) {
-    const uid = typeof userId === 'bigint' ? Number(userId) : userId;
-    const accessToken = await (0, jwt_js_1.signJwt)({ sub: uid }, env_js_1.env.JWT_ACCESS_SECRET, env_js_1.env.ACCESS_EXPIRES_IN);
-    // refresh token aléatoire + stockage hashé
-    const refreshRaw = (0, node_crypto_1.randomUUID)() + '.' + (0, node_crypto_1.randomUUID)();
-    const tokenHash = (0, crypto_js_1.sha256)(refreshRaw);
-    const expiresAt = new Date(Date.now() + parseMs(env_js_1.env.REFRESH_EXPIRES_IN));
-    await prisma_js_1.prisma.refreshToken.create({
-        data: { userId: BigInt(uid), tokenHash, expiresAt },
-    });
-    return { accessToken, refreshToken: refreshRaw, expiresIn: env_js_1.env.ACCESS_EXPIRES_IN };
+  const uid = typeof userId === 'bigint' ? Number(userId) : userId;
+
+  const accessToken = await signJwt({ sub: uid }, env.JWT_ACCESS_SECRET, env.ACCESS_EXPIRES_IN);
+  const accessMs = parseMs(env.ACCESS_EXPIRES_IN);
+  const accessExp = new Date(Date.now() + accessMs).toISOString();
+
+  const refreshRaw = randomUUID() + '.' + randomUUID();
+  const tokenHash = sha256(refreshRaw);
+  const refreshMs = parseMs(env.REFRESH_EXPIRES_IN);
+  const refreshExp = new Date(Date.now() + refreshMs);
+
+  await prisma.refreshToken.create({
+    data: { userId: BigInt(uid), tokenHash, expiresAt: refreshExp },
+  });
+
+  return {
+    accessToken,
+    refreshToken: refreshRaw,
+    accessExpiresIn: env.ACCESS_EXPIRES_IN,
+    accessExpiresAt: accessExp,
+    refreshExpiresIn: env.REFRESH_EXPIRES_IN,
+    refreshExpiresAt: refreshExp.toISOString(),
+  };
 }
-// parse "15m"/"7d" -> ms
+
 function parseMs(s) {
     const m = /^(\d+)([smhd])$/.exec(s);
     if (!m)

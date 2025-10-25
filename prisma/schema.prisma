@@ -28,6 +28,9 @@ model User {
   activityLogs  ActivityLog[] @relation("ActorLogs")
 
   Client Client[]
+
+  profile  OwnerProfile?
+  invoices Invoice[]
 }
 
 model Client {
@@ -45,6 +48,8 @@ model Client {
   owner   User? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
 
   projects Project[]
+
+  invoices Invoice[]
 
   @@index([ownerId])
   @@index([email])
@@ -68,6 +73,120 @@ model Project {
   updatedAt     DateTime     @updatedAt
 
   @@index([clientId])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CARD
+  BANK_TRANSFER
+  CASH
+  CHECK
+  OTHER
+}
+
+model OwnerProfile {
+  id                BigInt   @id @default(autoincrement())
+  ownerId           BigInt   @unique
+  owner             User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  companyName       String
+  fullName          String?
+  addressLine1      String?
+  addressLine2      String?
+  postalCode        String?  @db.VarChar(32)
+  city              String?  @db.VarChar(191)
+  country           String?  @db.VarChar(191)
+  email             String?  @db.VarChar(191)
+  phone             String?  @db.VarChar(64)
+  vatNumber         String?  @db.VarChar(64)
+  taxId             String?  @db.VarChar(64)
+  registrationNumber String? @db.VarChar(64)
+  website           String?  @db.VarChar(191)
+  logoUrl           String?  @db.VarChar(255)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Invoice {
+  id          BigInt        @id @default(autoincrement())
+  ownerId     BigInt
+  owner       User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  clientId    BigInt
+  client      Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  number      String        @db.VarChar(64)
+  issueDate   DateTime
+  dueDate     DateTime
+  currency    String        @db.VarChar(8) @default("EUR")
+  status      InvoiceStatus @default(DRAFT)
+  sentAt      DateTime?
+  cancelledAt DateTime?
+  notes       String?
+  terms       String?
+  subtotal    Decimal       @db.Decimal(12, 2) @default(0)
+  taxTotal    Decimal       @db.Decimal(12, 2) @default(0)
+  total       Decimal       @db.Decimal(12, 2) @default(0)
+  paidAmount  Decimal       @db.Decimal(12, 2) @default(0)
+  balanceDue  Decimal       @db.Decimal(12, 2) @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  items    InvoiceItem[]
+  payments Payment[]
+  events   InvoiceStatusEvent[]
+
+  @@unique([ownerId, number])
+  @@index([clientId])
+  @@index([ownerId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+model InvoiceItem {
+  id         BigInt   @id @default(autoincrement())
+  invoiceId  BigInt
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity   Decimal  @db.Decimal(12, 2) @default(1)
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  taxRate    Decimal  @db.Decimal(5, 2) @default(0)
+  total      Decimal  @db.Decimal(12, 2) @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([invoiceId])
+}
+
+model Payment {
+  id         BigInt        @id @default(autoincrement())
+  invoiceId  BigInt
+  invoice    Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount     Decimal       @db.Decimal(12, 2)
+  method     PaymentMethod @default(OTHER)
+  reference  String?       @db.VarChar(191)
+  receivedAt DateTime      @default(now())
+  notes      String?
+  createdAt  DateTime      @default(now())
+
+  @@index([invoiceId])
+}
+
+model InvoiceStatusEvent {
+  id         BigInt        @id @default(autoincrement())
+  invoiceId  BigInt
+  invoice    Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  fromStatus InvoiceStatus?
+  toStatus   InvoiceStatus
+  reason     String?
+  createdAt  DateTime      @default(now())
+
+  @@index([invoiceId])
 }
 
 model Role {
