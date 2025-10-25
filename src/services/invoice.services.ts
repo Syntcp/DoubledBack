@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { prisma } from '../lib/prisma.js';
 import type { Prisma } from '@prisma/client';
+import PDFDocument from 'pdfkit';
 
 type DecimalLike = Prisma.Decimal | number | string | null | undefined;
 function toNum(d: DecimalLike): number {
@@ -37,6 +38,7 @@ export type InvoicePublic = {
   balanceDue: number;
   createdAt: Date;
   updatedAt: Date;
+  client?: { id: number; fullName?: string | null; company?: string | null; email?: string | null };
   items?: Array<{
     id: number;
     description: string;
@@ -124,7 +126,11 @@ function computeTotals(items: InvoiceItemInput[]) {
   let taxTotal = 0;
   let total = 0;
   for (const it of items) {
-    const { subtotal: s, tax, total: t } = computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? 0);
+    const {
+      subtotal: s,
+      tax,
+      total: t,
+    } = computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? 0);
     subtotal += s;
     taxTotal += tax;
     total += t;
@@ -195,20 +201,101 @@ function yearBounds(d = new Date()): { start: Date; end: Date } {
 
 async function generateInvoiceNumber(ownerId: bigint) {
   const { start, end } = yearBounds();
-  const count = await prisma.invoice.count({ where: { ownerId, issueDate: { gte: start, lt: end } } });
+  const count = await prisma.invoice.count({
+    where: { ownerId, issueDate: { gte: start, lt: end } },
+  });
   const seq = (count + 1).toString().padStart(4, '0');
   return `INV-${start.getUTCFullYear()}-${seq}`;
 }
 
-export async function createInvoice(userId: number, clientId: number, input: {
-  number?: string;
-  issueDate?: Date;
-  dueDate: Date;
-  currency?: string;
-  notes?: string;
-  terms?: string;
-  items: InvoiceItemInput[];
-}) {
+export async function listInvoicesForOwner(
+  userId: number,
+  opts: {
+    q?: string;
+    status?: InvoicePublic['status'];
+    overdue?: boolean;
+    from?: string;
+    to?: string;
+    page: number;
+    pageSize: number;
+    clientId?: number;
+  },
+) {
+  const uid = BigInt(userId);
+  const { q, status, overdue, from, to, page, pageSize, clientId } = opts;
+  const skip = (page - 1) * pageSize;
+
+  const where: Prisma.InvoiceWhereInput = { ownerId: uid };
+  if (clientId) where.clientId = BigInt(clientId);
+  if (status) where.status = status as any;
+  if (from) where.issueDate = { ...(where.issueDate ?? {}), gte: new Date(from) };
+  if (to) where.issueDate = { ...(where.issueDate ?? {}), lte: new Date(to) };
+  if (overdue === true) {
+    (where.AND ||= []).push({
+      status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any },
+      dueDate: { lt: new Date() },
+    });
+  }
+  if (q && q.trim()) {
+    (where.OR ||= []).push(
+      { number: { contains: q, mode: 'insensitive' } },
+      { client: { fullName: { contains: q, mode: 'insensitive' } } },
+      { client: { company: { contains: q, mode: 'insensitive' } } },
+    );
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.invoice.findMany({
+      where,
+      skip,
+      take: pageSize,
+      orderBy: { createdAt: 'desc' },
+      include: { client: true },
+    }),
+    prisma.invoice.count({ where }),
+  ]);
+
+  return {
+    items: items.map((i) => toPublic(i /* tu peux étendre toPublic pour inclure client */)),
+    total,
+    page,
+    pageSize,
+  };
+}
+
+export async function allInvoiceSummary(userId: number) {
+  const uid = BigInt(userId);
+  const now = new Date();
+  const [total, unpaid, overdue, paid] = await Promise.all([
+    prisma.invoice.count({ where: { ownerId: uid } }),
+    prisma.invoice.count({
+      where: { ownerId: uid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any } },
+    }),
+    prisma.invoice.count({
+      where: {
+        ownerId: uid,
+        dueDate: { lt: now },
+        status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any },
+      },
+    }),
+    prisma.invoice.count({ where: { ownerId: uid, status: 'PAID' as any } }),
+  ]);
+  return { total, unpaid, overdue, paid };
+}
+
+export async function createInvoice(
+  userId: number,
+  clientId: number,
+  input: {
+    number?: string;
+    issueDate?: Date;
+    dueDate: Date;
+    currency?: string;
+    notes?: string;
+    terms?: string;
+    items: InvoiceItemInput[];
+  },
+) {
   const uid = BigInt(userId);
   const cid = BigInt(clientId);
   const client = await prisma.client.findFirst({ where: { id: cid, ownerId: uid } });
@@ -249,7 +336,11 @@ export async function createInvoice(userId: number, clientId: number, input: {
   return toPublic(full, true);
 }
 
-export async function listInvoicesByClient(userId: number, clientId: number, opts: { status?: InvoicePublic['status']; overdue?: boolean; page: number; pageSize: number }) {
+export async function listInvoicesByClient(
+  userId: number,
+  clientId: number,
+  opts: { status?: InvoicePublic['status']; overdue?: boolean; page: number; pageSize: number },
+) {
   const uid = BigInt(userId);
   const cid = BigInt(clientId);
   const client = await prisma.client.findFirst({ where: { id: cid, ownerId: uid } });
@@ -258,7 +349,11 @@ export async function listInvoicesByClient(userId: number, clientId: number, opt
   const skip = (page - 1) * pageSize;
   const where: Prisma.InvoiceWhereInput = { clientId: cid };
   if (status) where.status = status as any;
-  if (overdue === true) where.AND = [where.AND ?? [], { status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any }, dueDate: { lt: new Date() } }];
+  if (overdue === true)
+    where.AND = [
+      where.AND ?? [],
+      { status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any }, dueDate: { lt: new Date() } },
+    ];
   const [items, total] = await Promise.all([
     prisma.invoice.findMany({ where, skip, take: pageSize, orderBy: { createdAt: 'desc' } }),
     prisma.invoice.count({ where }),
@@ -269,20 +364,27 @@ export async function listInvoicesByClient(userId: number, clientId: number, opt
 export async function getInvoice(userId: number, id: number) {
   const uid = BigInt(userId);
   const iid = BigInt(id);
-  const inv = await prisma.invoice.findFirst({ where: { id: iid, ownerId: uid }, include: { items: true, payments: true, events: true, client: true } });
+  const inv = await prisma.invoice.findFirst({
+    where: { id: iid, ownerId: uid },
+    include: { items: true, payments: true, events: true, client: true },
+  });
   if (!inv) throw Object.assign(new Error('Facture introuvable'), { status: 404 });
   return toPublic(inv, true);
 }
 
-export async function updateInvoice(userId: number, id: number, input: {
-  number?: string;
-  issueDate?: Date;
-  dueDate?: Date;
-  currency?: string;
-  notes?: string;
-  terms?: string;
-  items?: InvoiceItemInput[];
-}) {
+export async function updateInvoice(
+  userId: number,
+  id: number,
+  input: {
+    number?: string;
+    issueDate?: Date;
+    dueDate?: Date;
+    currency?: string;
+    notes?: string;
+    terms?: string;
+    items?: InvoiceItemInput[];
+  },
+) {
   const uid = BigInt(userId);
   const iid = BigInt(id);
   const inv = await prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
@@ -315,7 +417,10 @@ export async function updateInvoice(userId: number, id: number, input: {
     }
   });
   await recalcInvoiceAggregates(iid);
-  const full = await prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+  const full = await prisma.invoice.findUnique({
+    where: { id: iid },
+    include: { items: true, payments: true, events: true },
+  });
   return toPublic(full, true);
 }
 
@@ -326,14 +431,36 @@ export async function deleteInvoice(userId: number, id: number) {
   if (del.count === 0) throw Object.assign(new Error('Facture introuvable'), { status: 404 });
 }
 
-export async function addPayment(userId: number, id: number, input: { amount: number; method: 'CARD'|'BANK_TRANSFER'|'CASH'|'CHECK'|'OTHER'; reference?: string; receivedAt?: Date; notes?: string }) {
+export async function addPayment(
+  userId: number,
+  id: number,
+  input: {
+    amount: number;
+    method: 'CARD' | 'BANK_TRANSFER' | 'CASH' | 'CHECK' | 'OTHER';
+    reference?: string;
+    receivedAt?: Date;
+    notes?: string;
+  },
+) {
   const uid = BigInt(userId);
   const iid = BigInt(id);
   const inv = await prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
   if (!inv) throw Object.assign(new Error('Facture introuvable'), { status: 404 });
-  await prisma.payment.create({ data: { invoiceId: iid, amount: input.amount, method: input.method as any, reference: input.reference, receivedAt: input.receivedAt ?? new Date(), notes: input.notes } });
+  await prisma.payment.create({
+    data: {
+      invoiceId: iid,
+      amount: input.amount,
+      method: input.method as any,
+      reference: input.reference,
+      receivedAt: input.receivedAt ?? new Date(),
+      notes: input.notes,
+    },
+  });
   await recalcInvoiceAggregates(iid);
-  const full = await prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+  const full = await prisma.invoice.findUnique({
+    where: { id: iid },
+    include: { items: true, payments: true, events: true },
+  });
   return toPublic(full, true);
 }
 
@@ -352,17 +479,27 @@ export async function markSent(userId: number, id: number) {
   const iid = BigInt(id);
   const inv = await prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
   if (!inv) throw Object.assign(new Error('Facture introuvable'), { status: 404 });
-  const updated = await prisma.invoice.update({ where: { id: iid }, data: { sentAt: inv.sentAt ?? new Date() } });
+  const updated = await prisma.invoice.update({
+    where: { id: iid },
+    data: { sentAt: inv.sentAt ?? new Date() },
+  });
   if (!inv.sentAt) {
-    await prisma.invoiceStatusEvent.create({ data: { invoiceId: iid, fromStatus: inv.status as any, toStatus: 'SENT' as any, reason: 'marked-sent' } });
+    await prisma.invoiceStatusEvent.create({
+      data: {
+        invoiceId: iid,
+        fromStatus: inv.status as any,
+        toStatus: 'SENT' as any,
+        reason: 'marked-sent',
+      },
+    });
   }
   await recalcInvoiceAggregates(updated.id);
-  const full = await prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+  const full = await prisma.invoice.findUnique({
+    where: { id: iid },
+    include: { items: true, payments: true, events: true },
+  });
   return toPublic(full, true);
 }
-
-// ---------- PDF Generation ----------
-import PDFDocument from 'pdfkit';
 
 async function getOwnerProfile(ownerId: bigint) {
   const [profile, user] = await Promise.all([
@@ -379,7 +516,10 @@ function formatMoney(n: number, currency = 'EUR') {
 export async function generateInvoicePdf(userId: number, id: number): Promise<Buffer> {
   const uid = BigInt(userId);
   const iid = BigInt(id);
-  const inv = await prisma.invoice.findFirst({ where: { id: iid, ownerId: uid }, include: { items: true, client: true, payments: true } });
+  const inv = await prisma.invoice.findFirst({
+    where: { id: iid, ownerId: uid },
+    include: { items: true, client: true, payments: true },
+  });
   if (!inv) throw Object.assign(new Error('Facture introuvable'), { status: 404 });
   const { profile, user } = await getOwnerProfile(uid);
 
@@ -429,7 +569,10 @@ export async function generateInvoicePdf(userId: number, id: number): Promise<Bu
     doc.moveDown(0.5);
     doc.font('Helvetica-Bold');
     doc.text('Description', 50, doc.y, { continued: true });
-    const colQty = 320, colUnit = 380, colTax = 450, colTotal = 520;
+    const colQty = 320,
+      colUnit = 380,
+      colTax = 450,
+      colTotal = 520;
     doc.text('Qté', colQty, undefined, { width: 40, align: 'right', continued: true });
     doc.text('PU', colUnit, undefined, { width: 60, align: 'right', continued: true });
     doc.text('TVA%', colTax, undefined, { width: 50, align: 'right', continued: true });
@@ -443,27 +586,46 @@ export async function generateInvoicePdf(userId: number, id: number): Promise<Bu
       const total = Number(it.total);
       doc.text(it.description, 50, doc.y, { continued: true });
       doc.text(qty.toString(), colQty, undefined, { width: 40, align: 'right', continued: true });
-      doc.text(formatMoney(unit, inv.currency), colUnit, undefined, { width: 60, align: 'right', continued: true });
+      doc.text(formatMoney(unit, inv.currency), colUnit, undefined, {
+        width: 60,
+        align: 'right',
+        continued: true,
+      });
       doc.text(tva.toFixed(2), colTax, undefined, { width: 50, align: 'right', continued: true });
-      doc.text(formatMoney(total, inv.currency), colTotal, undefined, { width: 70, align: 'right' });
+      doc.text(formatMoney(total, inv.currency), colTotal, undefined, {
+        width: 70,
+        align: 'right',
+      });
     }
 
     doc.moveDown();
     // Totals
     const rightCol = 400;
     doc.text('Sous-total:', rightCol, doc.y, { continued: true });
-    doc.text(formatMoney(Number(inv.subtotal), inv.currency), 500, undefined, { width: 90, align: 'right' });
+    doc.text(formatMoney(Number(inv.subtotal), inv.currency), 500, undefined, {
+      width: 90,
+      align: 'right',
+    });
     doc.text('TVA:', rightCol, doc.y, { continued: true });
-    doc.text(formatMoney(Number(inv.taxTotal), inv.currency), 500, undefined, { width: 90, align: 'right' });
+    doc.text(formatMoney(Number(inv.taxTotal), inv.currency), 500, undefined, {
+      width: 90,
+      align: 'right',
+    });
     doc.font('Helvetica-Bold');
     doc.text('Total:', rightCol, doc.y, { continued: true });
-    doc.text(formatMoney(Number(inv.total), inv.currency), 500, undefined, { width: 90, align: 'right' });
+    doc.text(formatMoney(Number(inv.total), inv.currency), 500, undefined, {
+      width: 90,
+      align: 'right',
+    });
     doc.font('Helvetica');
     doc.text('Déjà payé:', rightCol, doc.y, { continued: true });
     const paid = inv.payments.reduce((s, p) => s + Number(p.amount), 0);
     doc.text(formatMoney(paid, inv.currency), 500, undefined, { width: 90, align: 'right' });
     doc.text('Restant dû:', rightCol, doc.y, { continued: true });
-    doc.text(formatMoney(Math.max(0, Number(inv.total) - paid), inv.currency), 500, undefined, { width: 90, align: 'right' });
+    doc.text(formatMoney(Math.max(0, Number(inv.total) - paid), inv.currency), 500, undefined, {
+      width: 90,
+      align: 'right',
+    });
 
     // Notes / terms
     if (inv.notes) {
@@ -489,10 +651,20 @@ export async function clientInvoiceSummary(userId: number, clientId: number) {
   const now = new Date();
   const [total, unpaid, overdue, paid, anyPastOverdue] = await Promise.all([
     prisma.invoice.count({ where: { clientId: cid } }),
-    prisma.invoice.count({ where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any } } }),
-    prisma.invoice.count({ where: { clientId: cid, dueDate: { lt: now }, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any } } }),
+    prisma.invoice.count({
+      where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any } },
+    }),
+    prisma.invoice.count({
+      where: {
+        clientId: cid,
+        dueDate: { lt: now },
+        status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any },
+      },
+    }),
     prisma.invoice.count({ where: { clientId: cid, status: 'PAID' as any } }),
-    prisma.invoiceStatusEvent.count({ where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' as any } }),
+    prisma.invoiceStatusEvent.count({
+      where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' as any },
+    }),
   ]);
   return { total, unpaid, overdue, paid, hadPastOverdue: anyPastOverdue > 0 };
 }

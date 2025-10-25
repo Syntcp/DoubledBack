@@ -19,7 +19,20 @@ import {
   removePayment,
   updateInvoice,
   clientInvoiceSummary,
+  listInvoicesForOwner,
+  allInvoiceSummary,
 } from '../services/invoice.services.js';
+
+export async function listAll(req: AuthRequest, res: Response) {
+  const q = listInvoicesQuerySchema.parse(req.query);
+  const out = await listInvoicesForOwner(req.user!.id, q as any);
+  res.json(out);
+}
+
+export async function summaryAll(req: AuthRequest, res: Response) {
+  const out = await allInvoiceSummary(req.user!.id);
+  res.json(out);
+}
 
 export async function listForClient(req: AuthRequest, res: Response) {
   const { clientId } = clientIdParamSchema.parse(req.params);
