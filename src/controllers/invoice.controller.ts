@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth.js';
+import { logger } from '../lib/logger.js';
 import {
   addPaymentSchema,
   clientIdParamSchema,
@@ -87,12 +88,17 @@ export async function markAsSent(req: AuthRequest, res: Response) {
   res.json(out);
 }
 
-export async function downloadPdf(req: AuthRequest, res: Response) {
-  const { id } = invoiceIdParamSchema.parse(req.params);
-  const buf = await generateInvoicePdf(req.user!.id, id);
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
-  res.send(buf);
+export async function downloadPdf(req: AuthRequest, res: Response, next: Function) {
+  try {
+    const { id } = invoiceIdParamSchema.parse(req.params);
+    const buf = await generateInvoicePdf(req.user!.id, id);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
+    res.send(buf);
+  } catch (e: any) {
+    logger.error({ err: e, reqId: req.headers['x-request-id'] }, 'generateInvoicePdf failed');
+    next(e);
+  }
 }
 
 export async function summaryForClient(req: AuthRequest, res: Response) {
@@ -100,4 +106,3 @@ export async function summaryForClient(req: AuthRequest, res: Response) {
   const out = await clientInvoiceSummary(req.user!.id, clientId);
   res.json(out);
 }
-

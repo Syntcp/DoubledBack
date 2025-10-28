@@ -3,6 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.listInvoicesForOwner = listInvoicesForOwner;
+exports.allInvoiceSummary = allInvoiceSummary;
 exports.createInvoice = createInvoice;
 exports.listInvoicesByClient = listInvoicesByClient;
 exports.getInvoice = getInvoice;
@@ -15,6 +17,7 @@ exports.generateInvoicePdf = generateInvoicePdf;
 exports.clientInvoiceSummary = clientInvoiceSummary;
 // @ts-nocheck
 const prisma_js_1 = require("../lib/prisma.js");
+const pdfkit_1 = __importDefault(require("pdfkit"));
 function toNum(d) {
     if (d == null)
         return 0;
@@ -84,7 +87,7 @@ function computeTotals(items) {
     let taxTotal = 0;
     let total = 0;
     for (const it of items) {
-        const { subtotal: s, tax, total: t } = computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? 0);
+        const { subtotal: s, tax, total: t, } = computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? 0);
         subtotal += s;
         taxTotal += tax;
         total += t;
@@ -155,9 +158,69 @@ function yearBounds(d = new Date()) {
 }
 async function generateInvoiceNumber(ownerId) {
     const { start, end } = yearBounds();
-    const count = await prisma_js_1.prisma.invoice.count({ where: { ownerId, issueDate: { gte: start, lt: end } } });
+    const count = await prisma_js_1.prisma.invoice.count({
+        where: { ownerId, issueDate: { gte: start, lt: end } },
+    });
     const seq = (count + 1).toString().padStart(4, '0');
     return `INV-${start.getUTCFullYear()}-${seq}`;
+}
+async function listInvoicesForOwner(userId, opts) {
+    const uid = BigInt(userId);
+    const { q, status, overdue, from, to, page, pageSize, clientId } = opts;
+    const skip = (page - 1) * pageSize;
+    const where = { ownerId: uid };
+    if (clientId)
+        where.clientId = BigInt(clientId);
+    if (status)
+        where.status = status;
+    if (from)
+        where.issueDate = { ...(where.issueDate ?? {}), gte: new Date(from) };
+    if (to)
+        where.issueDate = { ...(where.issueDate ?? {}), lte: new Date(to) };
+    if (overdue === true) {
+        (where.AND ||= []).push({
+            status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] },
+            dueDate: { lt: new Date() },
+        });
+    }
+    if (q && q.trim()) {
+        (where.OR ||= []).push({ number: { contains: q, mode: 'insensitive' } }, { client: { fullName: { contains: q, mode: 'insensitive' } } }, { client: { company: { contains: q, mode: 'insensitive' } } });
+    }
+    const [items, total] = await Promise.all([
+        prisma_js_1.prisma.invoice.findMany({
+            where,
+            skip,
+            take: pageSize,
+            orderBy: { createdAt: 'desc' },
+            include: { client: true },
+        }),
+        prisma_js_1.prisma.invoice.count({ where }),
+    ]);
+    return {
+        items: items.map((i) => toPublic(i /* tu peux étendre toPublic pour inclure client */)),
+        total,
+        page,
+        pageSize,
+    };
+}
+async function allInvoiceSummary(userId) {
+    const uid = BigInt(userId);
+    const now = new Date();
+    const [total, unpaid, overdue, paid] = await Promise.all([
+        prisma_js_1.prisma.invoice.count({ where: { ownerId: uid } }),
+        prisma_js_1.prisma.invoice.count({
+            where: { ownerId: uid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] } },
+        }),
+        prisma_js_1.prisma.invoice.count({
+            where: {
+                ownerId: uid,
+                dueDate: { lt: now },
+                status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] },
+            },
+        }),
+        prisma_js_1.prisma.invoice.count({ where: { ownerId: uid, status: 'PAID' } }),
+    ]);
+    return { total, unpaid, overdue, paid };
 }
 async function createInvoice(userId, clientId, input) {
     const uid = BigInt(userId);
@@ -211,7 +274,10 @@ async function listInvoicesByClient(userId, clientId, opts) {
     if (status)
         where.status = status;
     if (overdue === true)
-        where.AND = [where.AND ?? [], { status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] }, dueDate: { lt: new Date() } }];
+        where.AND = [
+            where.AND ?? [],
+            { status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] }, dueDate: { lt: new Date() } },
+        ];
     const [items, total] = await Promise.all([
         prisma_js_1.prisma.invoice.findMany({ where, skip, take: pageSize, orderBy: { createdAt: 'desc' } }),
         prisma_js_1.prisma.invoice.count({ where }),
@@ -221,7 +287,10 @@ async function listInvoicesByClient(userId, clientId, opts) {
 async function getInvoice(userId, id) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
-    const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid }, include: { items: true, payments: true, events: true, client: true } });
+    const inv = await prisma_js_1.prisma.invoice.findFirst({
+        where: { id: iid, ownerId: uid },
+        include: { items: true, payments: true, events: true, client: true },
+    });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
     return toPublic(inv, true);
@@ -259,7 +328,10 @@ async function updateInvoice(userId, id, input) {
         }
     });
     await recalcInvoiceAggregates(iid);
-    const full = await prisma_js_1.prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+    const full = await prisma_js_1.prisma.invoice.findUnique({
+        where: { id: iid },
+        include: { items: true, payments: true, events: true },
+    });
     return toPublic(full, true);
 }
 async function deleteInvoice(userId, id) {
@@ -275,9 +347,21 @@ async function addPayment(userId, id, input) {
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
-    await prisma_js_1.prisma.payment.create({ data: { invoiceId: iid, amount: input.amount, method: input.method, reference: input.reference, receivedAt: input.receivedAt ?? new Date(), notes: input.notes } });
+    await prisma_js_1.prisma.payment.create({
+        data: {
+            invoiceId: iid,
+            amount: input.amount,
+            method: input.method,
+            reference: input.reference,
+            receivedAt: input.receivedAt ?? new Date(),
+            notes: input.notes,
+        },
+    });
     await recalcInvoiceAggregates(iid);
-    const full = await prisma_js_1.prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+    const full = await prisma_js_1.prisma.invoice.findUnique({
+        where: { id: iid },
+        include: { items: true, payments: true, events: true },
+    });
     return toPublic(full, true);
 }
 async function removePayment(userId, invoiceId, paymentId) {
@@ -296,16 +380,27 @@ async function markSent(userId, id) {
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
-    const updated = await prisma_js_1.prisma.invoice.update({ where: { id: iid }, data: { sentAt: inv.sentAt ?? new Date() } });
+    const updated = await prisma_js_1.prisma.invoice.update({
+        where: { id: iid },
+        data: { sentAt: inv.sentAt ?? new Date() },
+    });
     if (!inv.sentAt) {
-        await prisma_js_1.prisma.invoiceStatusEvent.create({ data: { invoiceId: iid, fromStatus: inv.status, toStatus: 'SENT', reason: 'marked-sent' } });
+        await prisma_js_1.prisma.invoiceStatusEvent.create({
+            data: {
+                invoiceId: iid,
+                fromStatus: inv.status,
+                toStatus: 'SENT',
+                reason: 'marked-sent',
+            },
+        });
     }
     await recalcInvoiceAggregates(updated.id);
-    const full = await prisma_js_1.prisma.invoice.findUnique({ where: { id: iid }, include: { items: true, payments: true, events: true } });
+    const full = await prisma_js_1.prisma.invoice.findUnique({
+        where: { id: iid },
+        include: { items: true, payments: true, events: true },
+    });
     return toPublic(full, true);
 }
-// ---------- PDF Generation ----------
-const pdfkit_1 = __importDefault(require("pdfkit"));
 async function getOwnerProfile(ownerId) {
     const [profile, user] = await Promise.all([
         prisma_js_1.prisma.ownerProfile.findUnique({ where: { ownerId } }),
@@ -314,112 +409,352 @@ async function getOwnerProfile(ownerId) {
     return { profile, user };
 }
 function formatMoney(n, currency = 'EUR') {
-    return new Intl.NumberFormat('fr-FR', { style: 'currency', currency }).format(n);
+    let code = typeof currency === 'string' ? currency : 'EUR';
+    try {
+        code = code.trim().toUpperCase();
+    }
+    catch {
+        code = 'EUR';
+    }
+    try {
+        return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: code }).format(n);
+    }
+    catch {
+        return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(n);
+    }
 }
 async function generateInvoicePdf(userId, id) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
-    const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid }, include: { items: true, client: true, payments: true } });
+    const inv = await prisma_js_1.prisma.invoice.findFirst({
+        where: { id: iid, ownerId: uid },
+        include: { items: true, client: true, payments: true },
+    });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
     const { profile, user } = await getOwnerProfile(uid);
-    const doc = new pdfkit_1.default({ size: 'A4', margin: 50 });
+    const MARGIN = 40;
+    const THEME = {
+        text: '#0f172a',
+        muted: '#64748b',
+        line: '#e5e7eb',
+        headBg: '#f8fafc',
+        zebra: '#f9fafb',
+        brand: profile?.brandColor || '#2563eb',
+        brandLight: '#eff6ff',
+        success: '#16a34a',
+        danger: '#dc2626',
+        white: '#ffffff',
+    };
+    function fmtDate(d) {
+        try {
+            if (!d)
+                return '';
+            const dd = d instanceof Date ? d : new Date(d);
+            return dd.toLocaleDateString('fr-FR');
+        }
+        catch {
+            return '';
+        }
+    }
+    const money = (n) => formatMoney(n, inv.currency);
+    async function loadLogo() {
+        try {
+            const logoUrl = profile?.logoUrl;
+            if (!logoUrl)
+                return null;
+            if (logoUrl.startsWith('data:')) {
+                const base64 = logoUrl.split(',')[1];
+                return Buffer.from(base64, 'base64');
+            }
+            const r = await fetch(logoUrl);
+            if (!r.ok)
+                return null;
+            const ab = await r.arrayBuffer();
+            return Buffer.from(ab);
+        }
+        catch {
+            return null;
+        }
+    }
+    const logoBuf = await loadLogo().catch(() => null);
+    const doc = new pdfkit_1.default({ size: 'A4', margin: MARGIN });
+    doc.fillColor(THEME.text);
     const chunks = [];
     return await new Promise((resolve, reject) => {
         doc.on('data', (d) => chunks.push(d));
         doc.on('error', reject);
         doc.on('end', () => resolve(Buffer.concat(chunks)));
-        // Header
-        doc.fontSize(20).text('FACTURE', { align: 'right' });
-        doc.moveDown();
-        // Seller block
-        doc.fontSize(12).text(profile?.companyName ?? 'Votre société');
-        if (profile?.fullName || user?.fullName)
-            doc.text(profile?.fullName ?? user?.fullName ?? '');
-        if (profile?.addressLine1)
-            doc.text(profile.addressLine1);
-        if (profile?.addressLine2)
-            doc.text(profile.addressLine2);
-        const cityLine = [profile?.postalCode, profile?.city].filter(Boolean).join(' ');
-        if (cityLine)
-            doc.text(cityLine);
-        if (profile?.country)
-            doc.text(profile.country);
-        if (profile?.email)
-            doc.text(`Email: ${profile.email}`);
-        if (profile?.phone)
-            doc.text(`Téléphone: ${profile.phone}`);
-        if (profile?.website)
-            doc.text(`Site: ${profile.website}`);
-        if (profile?.vatNumber)
-            doc.text(`TVA: ${profile.vatNumber}`);
-        if (profile?.registrationNumber)
-            doc.text(`SIREN/SIRET: ${profile.registrationNumber}`);
-        // Invoice meta
-        doc.moveDown();
-        doc.text(`Numéro: ${inv.number}`);
-        doc.text(`Date d'émission: ${inv.issueDate.toLocaleDateString('fr-FR')}`);
-        doc.text(`Échéance: ${inv.dueDate.toLocaleDateString('fr-FR')}`);
-        doc.text(`Statut: ${inv.status}`);
-        // Client block
-        doc.moveDown();
-        doc.text('Client:', { underline: true });
-        const clientName = [inv.client.fullName, inv.client.company].filter(Boolean).join(' - ');
-        doc.text(clientName);
-        if (inv.client.email)
-            doc.text(inv.client.email);
-        if (inv.client.phone)
-            doc.text(inv.client.phone);
-        // Items table
-        doc.moveDown();
-        doc.fontSize(12).text('Détails', { underline: true });
-        doc.moveDown(0.5);
-        doc.font('Helvetica-Bold');
-        doc.text('Description', 50, doc.y, { continued: true });
-        const colQty = 320, colUnit = 380, colTax = 450, colTotal = 520;
-        doc.text('Qté', colQty, undefined, { width: 40, align: 'right', continued: true });
-        doc.text('PU', colUnit, undefined, { width: 60, align: 'right', continued: true });
-        doc.text('TVA%', colTax, undefined, { width: 50, align: 'right', continued: true });
-        doc.text('Total', colTotal, undefined, { width: 70, align: 'right' });
-        doc.font('Helvetica');
-        for (const it of inv.items) {
-            const qty = Number(it.quantity);
-            const unit = Number(it.unitPrice);
-            const tva = Number(it.taxRate);
-            const total = Number(it.total);
-            doc.text(it.description, 50, doc.y, { continued: true });
-            doc.text(qty.toString(), colQty, undefined, { width: 40, align: 'right', continued: true });
-            doc.text(formatMoney(unit, inv.currency), colUnit, undefined, { width: 60, align: 'right', continued: true });
-            doc.text(tva.toFixed(2), colTax, undefined, { width: 50, align: 'right', continued: true });
-            doc.text(formatMoney(total, inv.currency), colTotal, undefined, { width: 70, align: 'right' });
-        }
-        doc.moveDown();
-        // Totals
-        const rightCol = 400;
-        doc.text('Sous-total:', rightCol, doc.y, { continued: true });
-        doc.text(formatMoney(Number(inv.subtotal), inv.currency), 500, undefined, { width: 90, align: 'right' });
-        doc.text('TVA:', rightCol, doc.y, { continued: true });
-        doc.text(formatMoney(Number(inv.taxTotal), inv.currency), 500, undefined, { width: 90, align: 'right' });
-        doc.font('Helvetica-Bold');
-        doc.text('Total:', rightCol, doc.y, { continued: true });
-        doc.text(formatMoney(Number(inv.total), inv.currency), 500, undefined, { width: 90, align: 'right' });
-        doc.font('Helvetica');
-        doc.text('Déjà payé:', rightCol, doc.y, { continued: true });
+        const pageW = doc.page.width;
+        const pageH = doc.page.height;
+        const contentW = pageW - MARGIN * 2;
         const paid = inv.payments.reduce((s, p) => s + Number(p.amount), 0);
-        doc.text(formatMoney(paid, inv.currency), 500, undefined, { width: 90, align: 'right' });
-        doc.text('Restant dû:', rightCol, doc.y, { continued: true });
-        doc.text(formatMoney(Math.max(0, Number(inv.total) - paid), inv.currency), 500, undefined, { width: 90, align: 'right' });
-        // Notes / terms
-        if (inv.notes) {
-            doc.moveDown();
-            doc.text('Notes:', { underline: true });
-            doc.text(inv.notes);
-        }
-        if (inv.terms) {
-            doc.moveDown();
-            doc.text('Conditions:', { underline: true });
-            doc.text(inv.terms);
-        }
+        const balance = Math.max(0, Number(inv.total) - paid);
+        // Ligne horizontale
+        // Pagination contrôlée (répète l'entête de tableau si on est dedans)
+        const need = (space, onTable = false) => {
+            if (doc.y + space <= pageH - MARGIN - 50)
+                return;
+            doc.addPage();
+            if (onTable)
+                drawTableHead();
+        };
+        // Libellés
+        const label = (t) => doc.font('Helvetica-Bold').fillColor(THEME.text).text(t);
+        const value = (t) => doc.font('Helvetica').fillColor(THEME.text).text(t);
+        // ——— Header ————————————————————————————————————————————————
+        const drawHeader = () => {
+            // Bande fine brand en haut
+            doc.save()
+                .rect(0, 0, pageW, 4)
+                .fill(THEME.brand)
+                .restore();
+            // Logo (gauche)
+            const topY = MARGIN - 8;
+            if (logoBuf) {
+                try {
+                    doc.image(logoBuf, MARGIN, topY, { width: 120, height: 40, fit: [120, 40] });
+                }
+                catch { /* ignore logo */ }
+            }
+            else {
+                doc.font('Helvetica-Bold')
+                    .fontSize(18)
+                    .fillColor(THEME.brand)
+                    .text(profile?.companyName ?? user?.fullName ?? 'Votre société', MARGIN, topY, { width: contentW * 0.5 });
+            }
+            // Cartouche "FACTURE" + méta (droite)
+            const boxW = 260;
+            const boxX = pageW - MARGIN - boxW;
+            const boxY = topY;
+            const c = inv.client ?? {};
+            const clientName = [c.fullName, c.company].filter(Boolean).join(' · ');
+            doc.save()
+                .roundedRect(boxX, boxY, boxW, 120, 10)
+                .fillAndStroke(THEME.headBg, THEME.line)
+                .restore();
+            doc.font('Helvetica-Bold')
+                .fontSize(18)
+                .fillColor(THEME.brand)
+                .text('FACTURE', boxX + 12, boxY + 10);
+            doc.font('Helvetica').fontSize(10).fillColor(THEME.text);
+            doc.text(`Numéro de Facture : ${inv.number}`, boxX + 12, boxY + 50, { width: boxW - 24 });
+            doc.text(`Émise le : ${fmtDate(inv.issueDate)}`);
+            doc.text(`Échéance : ${fmtDate(inv.dueDate)}`);
+            doc.text(`Client : ${clientName}`);
+            doc.text(`Email : ${c.email}`);
+            // Badge statut
+            try {
+                const pill = ` ${inv.status} `;
+                const pw = doc.widthOfString(pill) + 16;
+                const ph = 18;
+                const px = boxX + boxW - pw - 12;
+                const py = boxY + 5;
+                const color = inv.status === 'PAID' ? THEME.success :
+                    inv.status === 'OVERDUE' ? THEME.danger : THEME.brand;
+                doc.save()
+                    .roundedRect(px, py, pw, ph, 9).fill(color)
+                    .font('Helvetica-Bold').fontSize(10).fillColor(THEME.white)
+                    .text(pill, px, py + 5, { width: pw, align: 'center' })
+                    .restore();
+            }
+            catch { }
+            doc.moveDown(1.4);
+            // Bloc vendeur (sous le logo)
+            const sellerX = MARGIN;
+            const sellerY = topY + 58;
+            const sellerW = contentW * 0.55;
+            doc.font('Helvetica-Bold').fontSize(11).fillColor(THEME.text)
+                .text(profile?.companyName ?? user?.fullName ?? 'Votre société', sellerX, sellerY, { width: sellerW });
+            doc.font('Helvetica').fontSize(10).fillColor(THEME.muted);
+            const sellerLines = [];
+            if (profile?.fullName || user?.fullName)
+                sellerLines.push(String(profile?.fullName ?? user?.fullName));
+            if (profile?.addressLine1)
+                sellerLines.push(profile.addressLine1);
+            if (profile?.addressLine2)
+                sellerLines.push(profile.addressLine2);
+            const cityLine = [profile?.postalCode, profile?.city].filter(Boolean).join(' ');
+            if (cityLine)
+                sellerLines.push(cityLine);
+            if (profile?.country)
+                sellerLines.push(String(profile.country));
+            if (profile?.email)
+                sellerLines.push(`Email: ${profile.email}`);
+            if (profile?.phone)
+                sellerLines.push(`Téléphone: ${profile.phone}`);
+            if (profile?.registrationNumber)
+                sellerLines.push(`SIREN/SIRET: ${profile.registrationNumber}`);
+            sellerLines.forEach((l) => doc.text(l, { width: sellerW }));
+            // Tampon PAYÉ en filigrane si payé
+            if (inv.status === 'PAID') {
+                const cx = MARGIN + contentW * 0.35, cy = doc.y - 0;
+                try {
+                    doc.save()
+                        .rotate(-12, { origin: [cx, cy] })
+                        .fillColor(THEME.success).fillOpacity(0.08)
+                        .rect(cx - 120, cy - 22, 240, 44).fill()
+                        .fillOpacity(1).font('Helvetica-Bold').fontSize(24)
+                        .fillColor(THEME.success)
+                        .text('PAYÉ', cx - 70, cy - 10, { width: 140, align: 'center' })
+                        .restore();
+                }
+                catch { }
+            }
+        };
+        // ——— Tableau des lignes ————————————————————————————————
+        const cols = [
+            { label: 'Description', w: Math.floor(contentW * 0.50), align: 'left' },
+            { label: 'Qté', w: 48, align: 'left' },
+            { label: 'PU HT', w: 48, align: 'left' },
+            { label: 'TVA %', w: 48, align: 'left' },
+            { label: 'Total TTC', w: 48, align: 'left' },
+        ];
+        const gap = 10;
+        const x0 = MARGIN;
+        const colX = (i) => x0 + cols.slice(0, i).reduce((s, c) => s + c.w + gap, 0);
+        const drawTableHead = () => {
+            const h = 26;
+            doc.save()
+                .rect(MARGIN, doc.y, contentW, h).fill(THEME.brandLight)
+                .restore()
+                .strokeColor(THEME.line).lineWidth(0.5)
+                .moveTo(MARGIN, doc.y + h).lineTo(pageW - MARGIN, doc.y + h).stroke();
+            doc.font('Helvetica-Bold').fontSize(10).fillColor(THEME.brand);
+            cols.forEach((c, i) => {
+                doc.text(c.label, colX(i), doc.y + 8, { width: c.w, align: c.align });
+            });
+            doc.moveDown(1.1);
+        };
+        const drawRows = () => {
+            doc.font('Helvetica').fontSize(10).fillColor(THEME.text);
+            inv.items.forEach((it, idx) => {
+                const desc = String(it.description || '');
+                const qty = Number(it.quantity);
+                const unit = Number(it.unitPrice);
+                const tax = Number(it.taxRate);
+                const tot = Number(it.total);
+                const descH = doc.heightOfString(desc, { width: cols[0].w, align: 'left' });
+                const lineH = Math.max(20, descH + 8);
+                need(lineH + 6, true);
+                if (idx % 2 === 1) {
+                    doc.save().rect(MARGIN, doc.y - 2, contentW, lineH).fill(THEME.zebra).restore();
+                }
+                doc.fillColor(THEME.text);
+                doc.text(desc, colX(0), doc.y + 4, { width: cols[0].w, align: 'left' });
+                doc.text(String(qty), colX(1), doc.y + 4, { width: cols[1].w, align: 'right' });
+                doc.text(money(unit), colX(2), doc.y + 4, { width: cols[2].w, align: 'right' });
+                doc.text(tax.toFixed(2), colX(3), doc.y + 4, { width: cols[3].w, align: 'right' });
+                doc.text(money(tot), colX(4), doc.y + 4, { width: cols[4].w, align: 'right' });
+                doc.strokeColor(THEME.line).lineWidth(0.5)
+                    .moveTo(MARGIN, doc.y + lineH).lineTo(pageW - MARGIN, doc.y + lineH).stroke();
+                doc.y += lineH;
+            });
+            doc.moveDown(0.4);
+        };
+        // ——— Totaux + Règlement ————————————————————————————————
+        const drawTotals = () => {
+            need(140);
+            const boxW = 300;
+            const boxX = pageW - MARGIN - boxW;
+            const startY = doc.y + 6;
+            doc.save()
+                .roundedRect(boxX, startY, boxW, 300, 10)
+                .fillAndStroke(THEME.white, THEME.line)
+                .restore();
+            const row = (labelTxt, valTxt, bold = false) => {
+                const lh = 22;
+                doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(THEME.text);
+                doc.text(labelTxt, boxX + 10, doc.y + 8, { width: boxW - 120, align: 'left' });
+                doc.text(valTxt, boxX + boxW - 10 - 110, doc.y + 8, { width: 110, align: 'right' });
+                doc.y += lh;
+            };
+            doc.y = startY + 2;
+            row('Sous-total', money(Number(inv.subtotal)));
+            row('TVA', money(Number(inv.taxTotal)));
+            row('Total', money(Number(inv.total)), true);
+            row('Déjà payé', money(inv.paidAmount));
+            row('Restant dû', money(inv.balanceDue), true);
+            // Badge d’échéance si reste à payer
+            if (balance > 0) {
+                const badge = `À payer avant le ${fmtDate(inv.dueDate)}`;
+                const bw = doc.widthOfString(badge) + 14;
+                const by = startY - 18;
+                const bx = boxX + boxW - bw;
+                doc.save()
+                    .roundedRect(bx, by, bw, 16, 6)
+                    .fillAndStroke(THEME.brandLight, THEME.line)
+                    .font('Helvetica').fontSize(9).fillColor(THEME.brand)
+                    .text(badge, bx + 7, by + 3)
+                    .restore();
+            }
+            // Panneau Règlement (gauche)
+            const payX = MARGIN;
+            const payW = contentW - boxW - 16;
+            const payH = 132;
+            doc.save()
+                .roundedRect(payX, startY, payW, payH, 10)
+                .fillAndStroke(THEME.headBg, THEME.line)
+                .restore();
+            doc.font('Helvetica-Bold').fontSize(11).fillColor(THEME.text)
+                .text('Règlement', payX + 12, startY + 10);
+            doc.font('Helvetica').fontSize(10).fillColor(THEME.text);
+            const lines = [];
+            const iban = profile?.iban;
+            const bic = profile?.bic;
+            const bank = profile?.bankName;
+            if (bank)
+                lines.push(`Banque : ${bank}`);
+            if (iban)
+                lines.push(`IBAN : ${iban}`);
+            if (bic)
+                lines.push(`BIC : ${bic}`);
+            if (profile?.email)
+                lines.push(`Contact : ${profile.email}`);
+            if (profile?.phone)
+                lines.push(`Téléphone : ${profile.phone}`);
+            if (lines.length === 0)
+                lines.push('Merci d’effectuer le virement selon les modalités convenues.');
+            lines.forEach((l, i) => {
+                doc.text(l, payX + 12, startY + 34 + i * 16, { width: payW - 24 });
+            });
+            doc.y = Math.max(doc.y, startY + payH);
+            doc.moveDown(1);
+        };
+        // ——— Notes / mentions ————————————————————————————————
+        const drawNotes = () => {
+            const block = (title, text) => {
+                if (!text)
+                    return;
+                label(title);
+                doc.moveDown(0.2);
+                doc.font('Helvetica').fillColor(THEME.text).fontSize(10)
+                    .text(text, { width: contentW });
+                doc.moveDown(0.8);
+            };
+            block('Notes', inv.notes);
+            block('Conditions', inv.terms);
+        };
+        // ——— Footer discret et STABLE (pas de pageAdded, pas de dépassement) ———
+        const drawFooter = () => {
+            const y = pageH - MARGIN - 14; // toujours au-dessus de la marge
+            const left = [profile?.website, profile?.email, profile?.phone].filter(Boolean).join('  •  ');
+            const prevY = doc.y; // ne pas polluer le flux
+            doc.save()
+                .fontSize(9).fillColor(THEME.muted)
+                .text(left, MARGIN, y, { width: contentW * 0.6, align: 'left', lineBreak: false })
+                .text(`Page ${doc.page.number}`, MARGIN + contentW * 0.6, y, { width: contentW * 0.4, align: 'right', lineBreak: false })
+                .restore();
+            doc.y = prevY;
+        };
+        // ——— Orchestration ———————————————————————————————————————
+        drawHeader();
+        doc.moveDown(0.4);
+        drawTableHead();
+        drawRows();
+        drawTotals();
+        drawNotes();
+        drawFooter();
         doc.end();
     });
 }
@@ -432,10 +767,20 @@ async function clientInvoiceSummary(userId, clientId) {
     const now = new Date();
     const [total, unpaid, overdue, paid, anyPastOverdue] = await Promise.all([
         prisma_js_1.prisma.invoice.count({ where: { clientId: cid } }),
-        prisma_js_1.prisma.invoice.count({ where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] } } }),
-        prisma_js_1.prisma.invoice.count({ where: { clientId: cid, dueDate: { lt: now }, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] } } }),
+        prisma_js_1.prisma.invoice.count({
+            where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] } },
+        }),
+        prisma_js_1.prisma.invoice.count({
+            where: {
+                clientId: cid,
+                dueDate: { lt: now },
+                status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] },
+            },
+        }),
         prisma_js_1.prisma.invoice.count({ where: { clientId: cid, status: 'PAID' } }),
-        prisma_js_1.prisma.invoiceStatusEvent.count({ where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' } }),
+        prisma_js_1.prisma.invoiceStatusEvent.count({
+            where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' },
+        }),
     ]);
     return { total, unpaid, overdue, paid, hadPastOverdue: anyPastOverdue > 0 };
 }

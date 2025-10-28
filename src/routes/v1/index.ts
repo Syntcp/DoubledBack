@@ -5,6 +5,7 @@ import clients from './clients.routes.js';
 import projects from './projects.routes.js';
 import invoices from './invoices.routes.js';
 import profile from './profile.routes.js';
+import expenses from './expenses.routes.js';
 
 const v1 = Router();
 v1.use(health);
@@ -13,5 +14,6 @@ v1.use(clients);
 v1.use(projects);
 v1.use(invoices);
 v1.use(profile);
+v1.use(expenses);
 
 export default v1;

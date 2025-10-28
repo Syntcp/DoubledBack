@@ -9,9 +9,8 @@ require("express-async-errors");
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
 const compression_1 = __importDefault(require("compression"));
-const pino_http_1 = __importDefault(require("pino-http"));
-const node_crypto_1 = require("node:crypto");
 const logger_js_1 = require("./lib/logger.js");
+const request_logger_js_1 = require("./middleware/request-logger.js");
 const index_js_1 = __importDefault(require("./routes/index.js"));
 function createApp() {
     const app = (0, express_1.default)();
@@ -20,18 +19,9 @@ function createApp() {
     app.use((0, helmet_1.default)());
     app.use((0, compression_1.default)());
     app.use((0, cors_1.default)({ origin: true, credentials: true }));
-    const httpLoggerOptions = {
-        logger: logger_js_1.logger,
-        genReqId(req, res) {
-            const header = req.headers['x-request-id'];
-            if (typeof header === 'string' && header.length > 0)
-                return header;
-            const id = (0, node_crypto_1.randomUUID)();
-            res.setHeader('x-request-id', id);
-            return id;
-        }
-    };
-    app.use((0, pino_http_1.default)(httpLoggerOptions));
+    // Attach a request id and basic logs (homemade instead of pino-http)
+    app.use(request_logger_js_1.requestId);
+    app.use(request_logger_js_1.requestLogger);
     app.use(express_1.default.json({ limit: '1mb' }));
     app.use(express_1.default.urlencoded({ extended: false, limit: '1mb' }));
     app.get('/health', (_req, res) => {
@@ -40,10 +30,22 @@ function createApp() {
     app.use('/api', index_js_1.default);
     app.use((_req, res) => res.status(404).json({ error: 'NotFound' }));
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    app.use((err, _req, res, _next) => {
-        const status = err.status || 500;
-        const message = process.env.NODE_ENV === 'production' ? 'Server error' : err.message;
-        res.status(status).json({ error: err.name || 'Error', message });
+    app.use((err, req, res, _next) => {
+        const status = err?.status || 500;
+        const reqId = req.headers['x-request-id'] || res.getHeader('x-request-id') || '';
+        const method = req.method;
+        const url = req.originalUrl || req.url;
+        logger_js_1.logger.error({ err, status, method, url, reqId }, 'Unhandled error');
+        const isProd = process.env.NODE_ENV === 'production';
+        const body = {
+            error: err?.name || 'Error',
+            message: isProd ? 'Server error' : err?.message,
+        };
+        if (reqId)
+            body.requestId = reqId;
+        if (!isProd && err?.stack)
+            body.stack = String(err.stack);
+        res.status(status).json(body);
     });
     return app;
 }

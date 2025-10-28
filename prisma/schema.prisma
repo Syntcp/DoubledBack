@@ -31,6 +31,8 @@ model User {
 
   profile  OwnerProfile?
   invoices Invoice[]
+
+  Expense Expense[]
 }
 
 model Client {
@@ -146,6 +148,7 @@ model Invoice {
   @@index([ownerId])
   @@index([status])
   @@index([dueDate])
+  ExpenseInvoiceLink ExpenseInvoiceLink[]
 }
 
 model InvoiceItem {
@@ -187,6 +190,53 @@ model InvoiceStatusEvent {
   createdAt  DateTime      @default(now())
 
   @@index([invoiceId])
+}
+
+// Expenses (owner's own bills/costs)
+
+enum ExpenseFrequency {
+  ONE_OFF
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+}
+
+model Expense {
+  id          BigInt            @id @default(autoincrement())
+  ownerId     BigInt
+  owner       User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  vendor      String
+  description String?
+  amount      Decimal           @db.Decimal(12, 2)
+  currency    String            @db.VarChar(8) @default("EUR")
+  frequency   ExpenseFrequency  @default(ONE_OFF)
+  startDate   DateTime          @default(now())
+  endDate     DateTime?
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  invoiceLinks ExpenseInvoiceLink[]
+
+  @@index([ownerId])
+  @@index([frequency])
+  @@index([startDate])
+}
+
+model ExpenseInvoiceLink {
+  id         BigInt   @id @default(autoincrement())
+  expenseId  BigInt
+  expense    Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  invoiceId  BigInt
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  allocated  Decimal? @db.Decimal(12, 2)
+  createdAt  DateTime @default(now())
+
+  @@index([expenseId])
+  @@index([invoiceId])
+  @@unique([expenseId, invoiceId])
 }
 
 model Role {

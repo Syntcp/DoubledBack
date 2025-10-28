@@ -1,5 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.listAll = listAll;
+exports.summaryAll = summaryAll;
 exports.listForClient = listForClient;
 exports.createForClient = createForClient;
 exports.getOne = getOne;
@@ -10,8 +12,18 @@ exports.unpay = unpay;
 exports.markAsSent = markAsSent;
 exports.downloadPdf = downloadPdf;
 exports.summaryForClient = summaryForClient;
+const logger_js_1 = require("../lib/logger.js");
 const invoice_schema_js_1 = require("../schemas/invoice.schema.js");
 const invoice_services_js_1 = require("../services/invoice.services.js");
+async function listAll(req, res) {
+    const q = invoice_schema_js_1.listInvoicesQuerySchema.parse(req.query);
+    const out = await (0, invoice_services_js_1.listInvoicesForOwner)(req.user.id, q);
+    res.json(out);
+}
+async function summaryAll(req, res) {
+    const out = await (0, invoice_services_js_1.allInvoiceSummary)(req.user.id);
+    res.json(out);
+}
 async function listForClient(req, res) {
     const { clientId } = invoice_schema_js_1.clientIdParamSchema.parse(req.params);
     const q = invoice_schema_js_1.listInvoicesQuerySchema.parse(req.query);
@@ -58,12 +70,18 @@ async function markAsSent(req, res) {
     const out = await (0, invoice_services_js_1.markSent)(req.user.id, id);
     res.json(out);
 }
-async function downloadPdf(req, res) {
-    const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
-    const buf = await (0, invoice_services_js_1.generateInvoicePdf)(req.user.id, id);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
-    res.send(buf);
+async function downloadPdf(req, res, next) {
+    try {
+        const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
+        const buf = await (0, invoice_services_js_1.generateInvoicePdf)(req.user.id, id);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
+        res.send(buf);
+    }
+    catch (e) {
+        logger_js_1.logger.error({ err: e, reqId: req.headers['x-request-id'] }, 'generateInvoicePdf failed');
+        next(e);
+    }
 }
 async function summaryForClient(req, res) {
     const { clientId } = invoice_schema_js_1.clientIdParamSchema.parse(req.params);
