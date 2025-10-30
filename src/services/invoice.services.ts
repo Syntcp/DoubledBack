@@ -886,9 +886,12 @@ export async function generateInvoicePdf(userId: number, id: number): Promise<Bu
 export async function clientInvoiceSummary(userId: number, clientId: number) {
   const uid = BigInt(userId);
   const cid = BigInt(clientId);
+
   const client = await prisma.client.findFirst({ where: { id: cid, ownerId: uid } });
   if (!client) throw Object.assign(new Error('Client introuvable'), { status: 404 });
+
   const now = new Date();
+
   const [total, unpaid, overdue, paid, anyPastOverdue] = await Promise.all([
     prisma.invoice.count({ where: { clientId: cid } }),
     prisma.invoice.count({
@@ -906,5 +909,39 @@ export async function clientInvoiceSummary(userId: number, clientId: number) {
       where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' as any },
     }),
   ]);
-  return { total, unpaid, overdue, paid, hadPastOverdue: anyPastOverdue > 0 };
+  const [sumAll, sumUnpaid, sumOverdue, sumPaid] = await Promise.all([
+    prisma.invoice.aggregate({
+      where: { clientId: cid },
+      _sum: { total: true, paidAmount: true, balanceDue: true },
+    }),
+    prisma.invoice.aggregate({
+      where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any } },
+      _sum: { balanceDue: true },
+    }),
+    prisma.invoice.aggregate({
+      where: {
+        clientId: cid,
+        dueDate: { lt: now },
+        status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] as any },
+      },
+      _sum: { balanceDue: true },
+    }),
+    prisma.invoice.aggregate({
+      where: { clientId: cid, status: 'PAID' as any },
+      _sum: { total: true },
+    }),
+  ]);
+
+  const toNum = (n: any) => Number(n ?? 0);
+
+  return {
+    counts: { total, unpaid, overdue, paid },
+    amounts: {
+      total:   toNum(sumAll._sum.total),
+      unpaid:  toNum(sumUnpaid._sum.balanceDue),
+      overdue: toNum(sumOverdue._sum.balanceDue),
+      paid:    toNum(sumPaid._sum.total),
+    },
+    hadPastOverdue: anyPastOverdue > 0,
+  };
 }

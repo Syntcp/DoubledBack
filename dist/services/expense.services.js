@@ -142,11 +142,11 @@ async function financeSummary(userId, args) {
     const uid = BigInt(userId);
     const rawFrom = args.from ?? new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const rawTo = args.to ?? new Date();
-    // Normalize to inclusive day bounds
     const fromStart = new Date(rawFrom);
     fromStart.setHours(0, 0, 0, 0);
     const toEnd = new Date(rawTo);
     toEnd.setHours(23, 59, 59, 999);
+    // Revenue
     const [payments, invoices] = await Promise.all([
         prisma_js_1.prisma.payment.findMany({
             where: { invoice: { ownerId: uid }, receivedAt: { gte: fromStart, lte: toEnd } },
@@ -164,8 +164,8 @@ async function financeSummary(userId, args) {
         return s + count * toNum(e.amount);
     }, 0);
     return {
-        from: fromStart,
-        to: toEnd,
+        fromStart,
+        toEnd,
         mode: args.mode ?? 'paid',
         revenue,
         expenses: totalExpenses,
