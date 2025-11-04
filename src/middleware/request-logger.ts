@@ -1,6 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../lib/logger.js';
+import { prisma } from '../lib/prisma.js';
+import { redactSensitive } from '../lib/audit.js';
 
 export function requestId(req: Request, res: Response, next: NextFunction) {
   const header = req.headers['x-request-id'];
@@ -16,6 +18,8 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
   const url = (req as any).originalUrl || req.url;
   const ip = (req as any).ip || (req.socket && (req.socket as any).remoteAddress);
   const ua = req.headers['user-agent'];
+  const reasonHdr = req.headers['x-audit-reason'];
+  if (typeof reasonHdr === 'string') (res as any).locals = { ...(res as any).locals, auditReason: reasonHdr };
 
   logger.info({ id, method: req.method, url, ip, userAgent: ua }, 'Incoming request');
 
@@ -46,6 +50,40 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
     } else {
       logger.info(base, 'Request completed');
     }
+
+    // Persist request log (fire-and-forget)
+    const meta = {
+      requestId: id,
+      durationMs: Math.round(ms),
+      statusCode: res.statusCode,
+      method: req.method,
+      url,
+      query: redactSensitive(req.query),
+      params: redactSensitive((req as any).params || {}),
+      body: redactSensitive(req.body),
+      headers: redactSensitive({
+        ...req.headers,
+        authorization: undefined,
+        cookie: undefined,
+      }),
+      contentLength: typeof contentLength === 'string' ? Number(contentLength) : contentLength,
+      auth,
+      reason: (res as any).locals?.auditReason ?? null,
+    } as Record<string, unknown>;
+
+    void prisma.activityLog
+      .create({
+        data: {
+          actorUserId: userId != null ? BigInt(userId) : null,
+          entityType: 'http_request',
+          entityId: null,
+          action: 'request',
+          ip: (ip as any) ?? null,
+          userAgent: (ua as any) ?? null,
+          metadata: meta as any,
+        },
+      })
+      .catch(() => {});
   });
 
   next();

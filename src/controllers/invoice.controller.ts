@@ -1,6 +1,7 @@
 import type { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth.js';
 import { logger } from '../lib/logger.js';
+import { buildAuditContext, auditLog } from '../lib/audit.js';
 import {
   addPaymentSchema,
   clientIdParamSchema,
@@ -45,7 +46,8 @@ export async function listForClient(req: AuthRequest, res: Response) {
 export async function createForClient(req: AuthRequest, res: Response) {
   const { clientId } = clientIdParamSchema.parse(req.params);
   const input = createInvoiceSchema.parse(req.body);
-  const out = await createInvoice(req.user!.id, clientId, input);
+  const audit = buildAuditContext(req);
+  const out = await createInvoice(req.user!.id, clientId, input, audit);
   res.status(201).json(out);
 }
 
@@ -58,33 +60,38 @@ export async function getOne(req: AuthRequest, res: Response) {
 export async function updateOne(req: AuthRequest, res: Response) {
   const { id } = invoiceIdParamSchema.parse(req.params);
   const input = updateInvoiceSchema.parse(req.body);
-  const out = await updateInvoice(req.user!.id, id, input);
+  const audit = buildAuditContext(req);
+  const out = await updateInvoice(req.user!.id, id, input, audit);
   res.json(out);
 }
 
 export async function remove(req: AuthRequest, res: Response) {
   const { id } = invoiceIdParamSchema.parse(req.params);
-  await deleteInvoice(req.user!.id, id);
+  const audit = buildAuditContext(req);
+  await deleteInvoice(req.user!.id, id, audit);
   res.status(204).send();
 }
 
 export async function pay(req: AuthRequest, res: Response) {
   const { id } = invoiceIdParamSchema.parse(req.params);
   const input = addPaymentSchema.parse(req.body);
-  const out = await addPayment(req.user!.id, id, input);
+  const audit = buildAuditContext(req);
+  const out = await addPayment(req.user!.id, id, input, audit);
   res.json(out);
 }
 
 export async function unpay(req: AuthRequest, res: Response) {
   const { id, paymentId } = { id: Number(req.params.id), paymentId: Number(req.params.paymentId) };
   if (!Number.isFinite(paymentId) || paymentId <= 0) throw Object.assign(new Error('paymentId invalide'), { status: 400 });
-  await removePayment(req.user!.id, id, paymentId);
+  const audit = buildAuditContext(req);
+  await removePayment(req.user!.id, id, paymentId, audit);
   res.status(204).send();
 }
 
 export async function markAsSent(req: AuthRequest, res: Response) {
   const { id } = invoiceIdParamSchema.parse(req.params);
-  const out = await markSent(req.user!.id, id);
+  const audit = buildAuditContext(req);
+  const out = await markSent(req.user!.id, id, audit);
   res.json(out);
 }
 
@@ -95,6 +102,17 @@ export async function downloadPdf(req: AuthRequest, res: Response, next: Functio
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
     res.send(buf);
+    // Audit: PDF download
+    const audit = buildAuditContext(req);
+    await auditLog({
+      actorUserId: req.user!.id,
+      entityType: 'invoice',
+      entityId: id,
+      action: 'pdf_download',
+      ip: audit.ip ?? null,
+      userAgent: audit.userAgent ?? null,
+      metadata: { requestId: audit.requestId, reason: audit.reason ?? null },
+    });
   } catch (e: any) {
     logger.error({ err: e, reqId: req.headers['x-request-id'] }, 'generateInvoicePdf failed');
     next(e);

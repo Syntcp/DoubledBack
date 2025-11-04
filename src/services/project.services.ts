@@ -14,16 +14,16 @@ export type ProjectPublic = {
   liveUrl?: string | null;
   healthUrl?: string | null;
   lastRepoPushAt?: Date | null;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string | Date;
+  updatedAt: string | Date;
 };
 
 export type ProjectMeta = {
   repoHtmlUrl?: string | null;
-  repoLastPushAt?: string | null; // ISO string
+  repoLastPushAt?: string | null;
   online?: boolean | null;
   onlineStatus?: number | null;
-  onlineCheckedAt?: string | null; // ISO string
+  onlineCheckedAt?: string | null;
 };
 
 export type ProjectWithMeta = ProjectPublic & { meta?: ProjectMeta };
@@ -124,7 +124,7 @@ async function checkOnline(url?: string | null, timeoutMs = 3000): Promise<{ onl
   }
 }
 
-async function withMeta(p: ProjectPublic): Promise<ProjectWithMeta> {
+async function withMeta<T extends ProjectPublic>(p: T): Promise<T & { meta: ProjectMeta }> {
   const provider = (p.repoProvider ?? detectProviderFromUrl(p.repoUrl)) || null;
   let repoHtmlUrl: string | null | undefined;
   let repoLastPushAt: string | null | undefined;
@@ -153,7 +153,7 @@ async function withMeta(p: ProjectPublic): Promise<ProjectWithMeta> {
     onlineStatus: onlineInfo.status ?? null,
     onlineCheckedAt: new Date().toISOString(),
   };
-  return { ...p, meta };
+  return { ...p, meta } as T & { meta: ProjectMeta };
 }
 
 export async function listProjectsByClient(userId: number, clientId: number, opts?: { includeMeta?: boolean }) {
@@ -257,3 +257,62 @@ export async function deleteProject(userId: number, id: number) {
   if (del.count === 0) throw Object.assign(new Error('Projet introuvable'), { status: 404 });
 }
 
+export async function listProjectsForOwner(
+  userId: number,
+  opts: {
+    q?: string;
+    clientId?: number;
+    provider?: 'GITHUB' | 'GITLAB' | 'OTHER';
+    online?: boolean;
+    includeMeta?: boolean;
+    page: number;
+    pageSize: number;
+  }
+) {
+  const uid = BigInt(userId);
+  const { q, clientId, provider, online, includeMeta = true, page, pageSize } = opts;
+  const skip = (page - 1) * pageSize;
+
+  const where: any = { client: { ownerId: uid } };
+  if (clientId) where.clientId = BigInt(clientId);
+  if (provider) where.repoProvider = provider as any;
+  if (q && q.trim()) {
+    where.OR = [
+      { name: { contains: q, mode: 'insensitive' } },
+      { description: { contains: q, mode: 'insensitive' } },
+      { repoUrl: { contains: q, mode: 'insensitive' } },
+      { client: { fullName: { contains: q, mode: 'insensitive' } } },
+      { client: { company: { contains: q, mode: 'insensitive' } } },
+    ];
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.project.findMany({
+      where,
+      skip,
+      take: pageSize,
+      orderBy: { createdAt: 'desc' },
+      include: { client: true },
+    }),
+    prisma.project.count({ where }),
+  ]);
+
+  type ClientInfo = { id: number; fullName: string; company: string | null } | null;
+  type ProjectListItem = ProjectPublic & { client: ClientInfo } & { meta?: ProjectMeta };
+
+  let mapped: ProjectListItem[] = items.map((p: any) => ({
+    ...toPublic(p),
+    client: p.client ? { id: Number(p.client.id), fullName: p.client.fullName, company: p.client.company } : null,
+  }));
+
+  if (includeMeta) {
+    const withMetas = await Promise.all(mapped.map(m => withMeta(m)));
+    mapped = withMetas;
+  }
+
+  const filtered = typeof online === 'boolean'
+    ? mapped.filter(p => p.meta?.online === online)
+    : mapped;
+
+  return { items: filtered, total, page, pageSize };
+}

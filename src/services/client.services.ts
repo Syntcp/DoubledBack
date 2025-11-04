@@ -28,16 +28,22 @@ function toPublic(c: any): ClientPublic {
   };
 }
 
+function ciContains(q: string) {
+  const url = process.env.DATABASE_URL ?? '';
+  const isPg = /^postgres(ql)?:/i.test(url);
+  return isPg ? { contains: q, mode: 'insensitive' as const} : { contains: q};
+}
+
 export async function listClients(userId: number, opts: { q?: string; page: number; pageSize: number }) {
   const uid = BigInt(userId);
   const { q, page, pageSize } = opts;
   const skip = (page - 1) * pageSize;
   const where: any = { ownerId: uid };
   if (q && q.length > 0) {
-    where.OR = [
-      { fullName: { contains: q, mode: 'insensitive' as const } },
-      { email: { contains: q, mode: 'insensitive' as const } },
-      { company: { contains: q, mode: 'insensitive' as const } },
+   where.OR = [
+      { fullName: ciContains(q) },
+      { email:    ciContains(q) },
+      { company:  ciContains(q) },
     ];
   }
 

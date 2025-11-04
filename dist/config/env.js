@@ -13,6 +13,17 @@ const EnvSchema = zod_1.z.object({
     REFRESH_EXPIRES_IN: zod_1.z.string().default('7d'),
     GITHUB_TOKEN: zod_1.z.string().optional(),
     GITLAB_TOKEN: zod_1.z.string().optional(),
+    TVA_FR_SERVICES_BASE: zod_1.z.coerce.number().optional(),
+    TVA_FR_SERVICES_MAJOR: zod_1.z.coerce.number().optional(),
+    TVA_STANDARD_RATE: zod_1.z.coerce.number().optional(),
+    MICRO_BNC_RATE: zod_1.z.coerce.number().optional(),
+    CFP_RATE: zod_1.z.coerce.number().optional(),
+    VAT_EXIGIBILITY: zod_1.z.enum(['payments', 'invoices']).optional(),
+    VAT_OPTION_ENABLED: zod_1.z
+        .union([zod_1.z.literal('true'), zod_1.z.literal('false')])
+        .optional(),
+    ACRE_REDUCTION_FACTOR: zod_1.z.coerce.number().optional(),
+    INCOME_TAX_RATE: zod_1.z.coerce.number().optional(),
 });
 const parsed = EnvSchema.safeParse(process.env);
 if (!parsed.success) {

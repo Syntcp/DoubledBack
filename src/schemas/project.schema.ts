@@ -15,6 +15,18 @@ export const listProjectsQuerySchema = z.object({
     .transform((v) => (v === undefined ? true : v === 'true')),
 });
 
+export const listProjectsQuerySchemaOwner = z.object({
+  q: z.string().optional(),
+  clientId: z.coerce.number().int().positive().optional(),
+  provider: z.enum(['GITHUB', 'GITLAB', 'OTHER']).optional(),
+  online: z.union([z.literal('true'), z.literal('false')]).optional()
+    .transform(v => v === undefined ? undefined : v === 'true'),
+  includeMeta: z.union([z.literal('true'), z.literal('false')]).optional()
+    .transform(v => v === undefined ? true : v === 'true'),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
+});
+
 const repoProviderEnum = z.enum(['GITHUB', 'GITLAB', 'OTHER']).optional();
 
 export const createProjectSchema = z.object({

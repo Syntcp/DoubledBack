@@ -23,6 +23,8 @@ export const createInvoiceSchema = z.object({
   notes: z.string().optional(),
   terms: z.string().optional(),
   items: z.array(invoiceItemSchema).min(1),
+  // Exceptions de conformité TVA (ex: autoliquidation intra-UE)
+  reverseCharge: z.boolean().optional().default(false),
 });
 
 export const updateInvoiceSchema = z.object({
@@ -33,6 +35,7 @@ export const updateInvoiceSchema = z.object({
   notes: z.string().optional(),
   terms: z.string().optional(),
   items: z.array(invoiceItemSchema).min(1).optional(),
+  reverseCharge: z.boolean().optional(),
 });
 
 export const addPaymentSchema = z.object({
@@ -52,7 +55,7 @@ export const listInvoicesQuerySchema = z.object({
     .optional()
     .transform((v) => (v === undefined ? undefined : v === 'true')),
   page: z.coerce.number().int().min(1).optional().default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
+  pageSize: z.coerce.number().int().min(1).max(200).optional().default(20),
 });
 
 export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>;

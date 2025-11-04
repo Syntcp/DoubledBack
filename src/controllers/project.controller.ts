@@ -4,6 +4,7 @@ import {
   clientIdParamSchema,
   createProjectSchema,
   listProjectsQuerySchema,
+  listProjectsQuerySchemaOwner,
   projectIdParamSchema,
   updateProjectSchema,
 } from '../schemas/project.schema.js';
@@ -12,6 +13,7 @@ import {
   deleteProject,
   getProject,
   listProjectsByClient,
+  listProjectsForOwner,
   updateProject,
 } from '../services/project.services.js';
 
@@ -49,3 +51,8 @@ export async function remove(req: AuthRequest, res: Response) {
   res.status(204).send();
 }
 
+export async function listAllProjects(req: AuthRequest, res: Response) {
+  const q = listProjectsQuerySchemaOwner.parse(req.query);
+  const out = await listProjectsForOwner(req.user!.id, q as any);
+  res.json(out);
+}

@@ -5,6 +5,7 @@ exports.createForClient = createForClient;
 exports.getOne = getOne;
 exports.updateOne = updateOne;
 exports.remove = remove;
+exports.listAllProjects = listAllProjects;
 const project_schema_js_1 = require("../schemas/project.schema.js");
 const project_services_js_1 = require("../services/project.services.js");
 async function listForClient(req, res) {
@@ -35,4 +36,9 @@ async function remove(req, res) {
     const { id } = project_schema_js_1.projectIdParamSchema.parse(req.params);
     await (0, project_services_js_1.deleteProject)(req.user.id, id);
     res.status(204).send();
+}
+async function listAllProjects(req, res) {
+    const q = project_schema_js_1.listProjectsQuerySchemaOwner.parse(req.query);
+    const out = await (0, project_services_js_1.listProjectsForOwner)(req.user.id, q);
+    res.json(out);
 }

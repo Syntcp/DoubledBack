@@ -17,6 +17,7 @@ exports.generateInvoicePdf = generateInvoicePdf;
 exports.clientInvoiceSummary = clientInvoiceSummary;
 // @ts-nocheck
 const prisma_js_1 = require("../lib/prisma.js");
+const tax_services_js_1 = require("./tax.services.js");
 const pdfkit_1 = __importDefault(require("pdfkit"));
 function toNum(d) {
     if (d == null)
@@ -228,7 +229,17 @@ async function createInvoice(userId, clientId, input) {
     const client = await prisma_js_1.prisma.client.findFirst({ where: { id: cid, ownerId: uid } });
     if (!client)
         throw Object.assign(new Error('Client introuvable'), { status: 404 });
-    const items = input.items.map((it) => ({ ...it, taxRate: it.taxRate ?? 0 }));
+    const issueAt = input.issueDate ?? new Date();
+    const defaultRate = await (0, tax_services_js_1.resolveDefaultItemTaxRate)(userId, issueAt);
+    const items = input.items.map((it) => ({ ...it, taxRate: it.taxRate ?? defaultRate }));
+    // Guard: if VAT regime is active at issue date, prevent zero tax unless reverse charge
+    const ctx = await (0, tax_services_js_1.getVatContext)(userId, issueAt);
+    if (ctx.regime === 'VAT' && !input.reverseCharge) {
+        const allZero = items.every((i) => (i.taxRate ?? 0) === 0);
+        if (allZero) {
+            throw Object.assign(new Error('TVA requise à partir de la date de bascule. Utilisez reverseCharge si applicable.'), { status: 400 });
+        }
+    }
     const totals = computeTotals(items);
     const number = input.number || (await generateInvoiceNumber(uid));
     const created = await prisma_js_1.prisma.invoice.create({
@@ -301,6 +312,16 @@ async function updateInvoice(userId, id, input) {
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
+    const issueAt = input.issueDate ?? new Date();
+    const defaultRate = await (0, tax_services_js_1.resolveDefaultItemTaxRate)(userId, issueAt);
+    // Guard: if VAT regime is active at issue date, prevent zero tax unless reverse charge
+    const ctx = await (0, tax_services_js_1.getVatContext)(userId, issueAt);
+    if (ctx.regime === 'VAT' && !input.reverseCharge && input.items && input.items.length > 0) {
+        const allZero = input.items.every((i) => (i.taxRate ?? 0) === 0);
+        if (allZero) {
+            throw Object.assign(new Error('TVA requise à partir de la date de bascule. Utilisez reverseCharge si applicable.'), { status: 400 });
+        }
+    }
     await prisma_js_1.prisma.$transaction(async (tx) => {
         await tx.invoice.update({
             where: { id: iid },
@@ -321,8 +342,8 @@ async function updateInvoice(userId, id, input) {
                     description: it.description,
                     quantity: it.quantity,
                     unitPrice: it.unitPrice,
-                    taxRate: it.taxRate ?? 0,
-                    total: computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? 0).total,
+                    taxRate: it.taxRate ?? defaultRate,
+                    total: computeItemTotal(it.quantity, it.unitPrice, it.taxRate ?? defaultRate).total,
                 })),
             });
         }
@@ -481,7 +502,7 @@ async function generateInvoicePdf(userId, id) {
     const doc = new pdfkit_1.default({ size: 'A4', margin: MARGIN });
     doc.fillColor(THEME.text);
     const chunks = [];
-    return await new Promise((resolve, reject) => {
+    return await new Promise(async (resolve, reject) => {
         doc.on('data', (d) => chunks.push(d));
         doc.on('error', reject);
         doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -586,6 +607,9 @@ async function generateInvoicePdf(userId, id) {
             if (profile?.registrationNumber)
                 sellerLines.push(`SIREN/SIRET: ${profile.registrationNumber}`);
             sellerLines.forEach((l) => doc.text(l, { width: sellerW }));
+            if (profile?.vatNumber) {
+                doc.text(`N° TVA intracommunautaire: ${profile.vatNumber}`, { width: sellerW });
+            }
             // Tampon PAYÉ en filigrane si payé
             if (inv.status === 'PAID') {
                 const cx = MARGIN + contentW * 0.35, cy = doc.y - 0;
@@ -722,7 +746,7 @@ async function generateInvoicePdf(userId, id) {
             doc.moveDown(1);
         };
         // ——— Notes / mentions ————————————————————————————————
-        const drawNotes = () => {
+        const drawNotes = async () => {
             const block = (title, text) => {
                 if (!text)
                     return;
@@ -732,6 +756,14 @@ async function generateInvoicePdf(userId, id) {
                     .text(text, { width: contentW });
                 doc.moveDown(0.8);
             };
+            // Mention TVA selon régime à la date d'émission
+            try {
+                const ctx = await (0, tax_services_js_1.getVatContext)(Number(inv.ownerId), inv.issueDate);
+                if (ctx.regime === 'FRANCHISE') {
+                    block('TVA', 'TVA non applicable – article 293 B du CGI');
+                }
+            }
+            catch { }
             block('Notes', inv.notes);
             block('Conditions', inv.terms);
         };
@@ -753,7 +785,7 @@ async function generateInvoicePdf(userId, id) {
         drawTableHead();
         drawRows();
         drawTotals();
-        drawNotes();
+        await drawNotes();
         drawFooter();
         doc.end();
     });
@@ -782,5 +814,37 @@ async function clientInvoiceSummary(userId, clientId) {
             where: { invoice: { clientId: cid }, toStatus: 'OVERDUE' },
         }),
     ]);
-    return { total, unpaid, overdue, paid, hadPastOverdue: anyPastOverdue > 0 };
+    const [sumAll, sumUnpaid, sumOverdue, sumPaid] = await Promise.all([
+        prisma_js_1.prisma.invoice.aggregate({
+            where: { clientId: cid },
+            _sum: { total: true, paidAmount: true, balanceDue: true },
+        }),
+        prisma_js_1.prisma.invoice.aggregate({
+            where: { clientId: cid, status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] } },
+            _sum: { balanceDue: true },
+        }),
+        prisma_js_1.prisma.invoice.aggregate({
+            where: {
+                clientId: cid,
+                dueDate: { lt: now },
+                status: { in: ['SENT', 'PARTIAL', 'OVERDUE'] },
+            },
+            _sum: { balanceDue: true },
+        }),
+        prisma_js_1.prisma.invoice.aggregate({
+            where: { clientId: cid, status: 'PAID' },
+            _sum: { total: true },
+        }),
+    ]);
+    const toNum = (n) => Number(n ?? 0);
+    return {
+        counts: { total, unpaid, overdue, paid },
+        amounts: {
+            total: toNum(sumAll._sum.total),
+            unpaid: toNum(sumUnpaid._sum.balanceDue),
+            overdue: toNum(sumOverdue._sum.balanceDue),
+            paid: toNum(sumPaid._sum.total),
+        },
+        hadPastOverdue: anyPastOverdue > 0,
+    };
 }

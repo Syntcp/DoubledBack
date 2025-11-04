@@ -22,6 +22,8 @@ exports.createInvoiceSchema = zod_1.z.object({
     notes: zod_1.z.string().optional(),
     terms: zod_1.z.string().optional(),
     items: zod_1.z.array(exports.invoiceItemSchema).min(1),
+    // Exceptions de conformité TVA (ex: autoliquidation intra-UE)
+    reverseCharge: zod_1.z.boolean().optional().default(false),
 });
 exports.updateInvoiceSchema = zod_1.z.object({
     number: zod_1.z.string().min(1).optional(),
@@ -31,6 +33,7 @@ exports.updateInvoiceSchema = zod_1.z.object({
     notes: zod_1.z.string().optional(),
     terms: zod_1.z.string().optional(),
     items: zod_1.z.array(exports.invoiceItemSchema).min(1).optional(),
+    reverseCharge: zod_1.z.boolean().optional(),
 });
 exports.addPaymentSchema = zod_1.z.object({
     amount: zod_1.z.coerce.number().positive(),

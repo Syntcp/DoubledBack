@@ -5,6 +5,7 @@ exports.getProject = getProject;
 exports.createProject = createProject;
 exports.updateProject = updateProject;
 exports.deleteProject = deleteProject;
+exports.listProjectsForOwner = listProjectsForOwner;
 const prisma_js_1 = require("../lib/prisma.js");
 const env_js_1 = require("../config/env.js");
 function toPublic(p) {
@@ -219,4 +220,45 @@ async function deleteProject(userId, id) {
     const del = await prisma_js_1.prisma.project.deleteMany({ where: { id: pid, client: { ownerId: uid } } });
     if (del.count === 0)
         throw Object.assign(new Error('Projet introuvable'), { status: 404 });
+}
+async function listProjectsForOwner(userId, opts) {
+    const uid = BigInt(userId);
+    const { q, clientId, provider, online, includeMeta = true, page, pageSize } = opts;
+    const skip = (page - 1) * pageSize;
+    const where = { client: { ownerId: uid } };
+    if (clientId)
+        where.clientId = BigInt(clientId);
+    if (provider)
+        where.repoProvider = provider;
+    if (q && q.trim()) {
+        where.OR = [
+            { name: { contains: q, mode: 'insensitive' } },
+            { description: { contains: q, mode: 'insensitive' } },
+            { repoUrl: { contains: q, mode: 'insensitive' } },
+            { client: { fullName: { contains: q, mode: 'insensitive' } } },
+            { client: { company: { contains: q, mode: 'insensitive' } } },
+        ];
+    }
+    const [items, total] = await Promise.all([
+        prisma_js_1.prisma.project.findMany({
+            where,
+            skip,
+            take: pageSize,
+            orderBy: { createdAt: 'desc' },
+            include: { client: true },
+        }),
+        prisma_js_1.prisma.project.count({ where }),
+    ]);
+    let mapped = items.map((p) => ({
+        ...toPublic(p),
+        client: p.client ? { id: Number(p.client.id), fullName: p.client.fullName, company: p.client.company } : null,
+    }));
+    if (includeMeta) {
+        const withMetas = await Promise.all(mapped.map(m => withMeta(m)));
+        mapped = withMetas;
+    }
+    const filtered = typeof online === 'boolean'
+        ? mapped.filter(p => p.meta?.online === online)
+        : mapped;
+    return { items: filtered, total, page, pageSize };
 }
