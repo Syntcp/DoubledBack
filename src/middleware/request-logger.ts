@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { logger } from '../lib/logger.js';
 import { prisma } from '../lib/prisma.js';
 import { redactSensitive } from '../lib/audit.js';
+import { emitToUser } from '../lib/sse.js';
 
 export function requestId(req: Request, res: Response, next: NextFunction) {
   const header = req.headers['x-request-id'];
@@ -84,6 +85,20 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
         },
       })
       .catch(() => {});
+
+    // Emit SSE mutation event for successful write requests
+    try {
+      const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+      if (isMutation && res.statusCode < 400 && typeof userId === 'number') {
+        emitToUser(userId, 'mutation', {
+          requestId: id,
+          method: req.method,
+          url,
+          statusCode: res.statusCode,
+          ts: Date.now(),
+        });
+      }
+    } catch {}
   });
 
   next();

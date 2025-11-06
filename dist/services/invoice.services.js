@@ -17,6 +17,7 @@ exports.generateInvoicePdf = generateInvoicePdf;
 exports.clientInvoiceSummary = clientInvoiceSummary;
 // @ts-nocheck
 const prisma_js_1 = require("../lib/prisma.js");
+const audit_js_1 = require("../lib/audit.js");
 const tax_services_js_1 = require("./tax.services.js");
 const pdfkit_1 = __importDefault(require("pdfkit"));
 function toNum(d) {
@@ -93,7 +94,6 @@ function computeTotals(items) {
         taxTotal += tax;
         total += t;
     }
-    // round to 2 decimals
     const r = (n) => Math.round(n * 100) / 100;
     return { subtotal: r(subtotal), taxTotal: r(taxTotal), total: r(total) };
 }
@@ -114,7 +114,6 @@ async function recalcInvoiceAggregates(invId) {
         const totals = computeTotals(items);
         const paid = inv.payments.reduce((sum, p) => sum + Number(p.amount), 0);
         const balance = Math.max(0, Math.round((totals.total - paid) * 100) / 100);
-        // determine status automatically (unless cancelled)
         let newStatus = inv.status;
         if (inv.status !== 'CANCELLED') {
             if (paid >= totals.total - 0.009)
@@ -223,7 +222,7 @@ async function allInvoiceSummary(userId) {
     ]);
     return { total, unpaid, overdue, paid };
 }
-async function createInvoice(userId, clientId, input) {
+async function createInvoice(userId, clientId, input, audit) {
     const uid = BigInt(userId);
     const cid = BigInt(clientId);
     const client = await prisma_js_1.prisma.client.findFirst({ where: { id: cid, ownerId: uid } });
@@ -232,7 +231,6 @@ async function createInvoice(userId, clientId, input) {
     const issueAt = input.issueDate ?? new Date();
     const defaultRate = await (0, tax_services_js_1.resolveDefaultItemTaxRate)(userId, issueAt);
     const items = input.items.map((it) => ({ ...it, taxRate: it.taxRate ?? defaultRate }));
-    // Guard: if VAT regime is active at issue date, prevent zero tax unless reverse charge
     const ctx = await (0, tax_services_js_1.getVatContext)(userId, issueAt);
     if (ctx.regime === 'VAT' && !input.reverseCharge) {
         const allZero = items.every((i) => (i.taxRate ?? 0) === 0);
@@ -271,6 +269,21 @@ async function createInvoice(userId, clientId, input) {
         where: { id: created.id },
         include: { items: true, payments: true, events: true },
     });
+    // Audit: invoice created
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: created.id,
+        action: 'create',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            input: (0, audit_js_1.redactSensitive)(input),
+            result: toPublic(full, true),
+        },
+    });
     return toPublic(full, true);
 }
 async function listInvoicesByClient(userId, clientId, opts) {
@@ -306,15 +319,18 @@ async function getInvoice(userId, id) {
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
     return toPublic(inv, true);
 }
-async function updateInvoice(userId, id, input) {
+async function updateInvoice(userId, id, input, audit) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
+    const beforeFull = await prisma_js_1.prisma.invoice.findUnique({
+        where: { id: iid },
+        include: { items: true, payments: true, events: true },
+    });
     const issueAt = input.issueDate ?? new Date();
     const defaultRate = await (0, tax_services_js_1.resolveDefaultItemTaxRate)(userId, issueAt);
-    // Guard: if VAT regime is active at issue date, prevent zero tax unless reverse charge
     const ctx = await (0, tax_services_js_1.getVatContext)(userId, issueAt);
     if (ctx.regime === 'VAT' && !input.reverseCharge && input.items && input.items.length > 0) {
         const allZero = input.items.every((i) => (i.taxRate ?? 0) === 0);
@@ -353,22 +369,56 @@ async function updateInvoice(userId, id, input) {
         where: { id: iid },
         include: { items: true, payments: true, events: true },
     });
+    // Audit: invoice updated (before/after)
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: iid,
+        action: 'update',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            input: (0, audit_js_1.redactSensitive)(input),
+            before: beforeFull ? toPublic(beforeFull, true) : null,
+            after: toPublic(full, true),
+        },
+    });
     return toPublic(full, true);
 }
-async function deleteInvoice(userId, id) {
+async function deleteInvoice(userId, id, audit) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
+    const beforeFull = await prisma_js_1.prisma.invoice.findFirst({
+        where: { id: iid, ownerId: uid },
+        include: { items: true, payments: true, events: true },
+    });
     const del = await prisma_js_1.prisma.invoice.deleteMany({ where: { id: iid, ownerId: uid } });
     if (del.count === 0)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
+    // Audit: invoice deleted
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: iid,
+        action: 'delete',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            before: beforeFull ? toPublic(beforeFull, true) : null,
+        },
+    });
 }
-async function addPayment(userId, id, input) {
+async function addPayment(userId, id, input, audit) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
-    await prisma_js_1.prisma.payment.create({
+    const pay = await prisma_js_1.prisma.payment.create({
         data: {
             invoiceId: iid,
             amount: input.amount,
@@ -383,19 +433,49 @@ async function addPayment(userId, id, input) {
         where: { id: iid },
         include: { items: true, payments: true, events: true },
     });
+    // Audit: payment added
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: iid,
+        action: 'payment_add',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            payment: { id: Number(pay.id), amount: input.amount, method: input.method, reference: input.reference },
+            after: toPublic(full, true),
+        },
+    });
     return toPublic(full, true);
 }
-async function removePayment(userId, invoiceId, paymentId) {
+async function removePayment(userId, invoiceId, paymentId, audit) {
     const uid = BigInt(userId);
     const iid = BigInt(invoiceId);
     const pid = BigInt(paymentId);
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
     if (!inv)
         throw Object.assign(new Error('Facture introuvable'), { status: 404 });
+    const pay = await prisma_js_1.prisma.payment.findUnique({ where: { id: pid } });
     await prisma_js_1.prisma.payment.deleteMany({ where: { id: pid, invoiceId: iid } });
     await recalcInvoiceAggregates(iid);
+    // Audit: payment removed
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: iid,
+        action: 'payment_remove',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            payment: pay ? { id: Number(pay.id), amount: Number(pay.amount), method: pay.method, reference: pay.reference } : { id: Number(pid) },
+        },
+    });
 }
-async function markSent(userId, id) {
+async function markSent(userId, id, audit) {
     const uid = BigInt(userId);
     const iid = BigInt(id);
     const inv = await prisma_js_1.prisma.invoice.findFirst({ where: { id: iid, ownerId: uid } });
@@ -419,6 +499,20 @@ async function markSent(userId, id) {
     const full = await prisma_js_1.prisma.invoice.findUnique({
         where: { id: iid },
         include: { items: true, payments: true, events: true },
+    });
+    // Audit: invoice marked as sent
+    await (0, audit_js_1.auditLog)({
+        actorUserId: userId,
+        entityType: 'invoice',
+        entityId: iid,
+        action: 'mark_sent',
+        ip: audit?.ip ?? null,
+        userAgent: audit?.userAgent ?? null,
+        metadata: {
+            requestId: audit?.requestId,
+            reason: audit?.reason ?? null,
+            after: toPublic(full, true),
+        },
     });
     return toPublic(full, true);
 }
@@ -511,8 +605,6 @@ async function generateInvoicePdf(userId, id) {
         const contentW = pageW - MARGIN * 2;
         const paid = inv.payments.reduce((s, p) => s + Number(p.amount), 0);
         const balance = Math.max(0, Number(inv.total) - paid);
-        // Ligne horizontale
-        // Pagination contrôlée (répète l'entête de tableau si on est dedans)
         const need = (space, onTable = false) => {
             if (doc.y + space <= pageH - MARGIN - 50)
                 return;
@@ -520,41 +612,38 @@ async function generateInvoicePdf(userId, id) {
             if (onTable)
                 drawTableHead();
         };
-        // Libellés
         const label = (t) => doc.font('Helvetica-Bold').fillColor(THEME.text).text(t);
         const value = (t) => doc.font('Helvetica').fillColor(THEME.text).text(t);
-        // ——— Header ————————————————————————————————————————————————
         const drawHeader = () => {
-            // Bande fine brand en haut
-            doc.save()
-                .rect(0, 0, pageW, 4)
-                .fill(THEME.brand)
-                .restore();
-            // Logo (gauche)
+            doc.save().rect(0, 0, pageW, 4).fill(THEME.brand).restore();
             const topY = MARGIN - 8;
             if (logoBuf) {
                 try {
                     doc.image(logoBuf, MARGIN, topY, { width: 120, height: 40, fit: [120, 40] });
                 }
-                catch { /* ignore logo */ }
+                catch { }
             }
             else {
-                doc.font('Helvetica-Bold')
+                doc
+                    .font('Helvetica-Bold')
                     .fontSize(18)
                     .fillColor(THEME.brand)
-                    .text(profile?.companyName ?? user?.fullName ?? 'Votre société', MARGIN, topY, { width: contentW * 0.5 });
+                    .text(profile?.companyName ?? user?.fullName ?? 'Votre société', MARGIN, topY, {
+                    width: contentW * 0.5,
+                });
             }
-            // Cartouche "FACTURE" + méta (droite)
             const boxW = 260;
             const boxX = pageW - MARGIN - boxW;
             const boxY = topY;
             const c = inv.client ?? {};
             const clientName = [c.fullName, c.company].filter(Boolean).join(' · ');
-            doc.save()
+            doc
+                .save()
                 .roundedRect(boxX, boxY, boxW, 120, 10)
                 .fillAndStroke(THEME.headBg, THEME.line)
                 .restore();
-            doc.font('Helvetica-Bold')
+            doc
+                .font('Helvetica-Bold')
                 .fontSize(18)
                 .fillColor(THEME.brand)
                 .text('FACTURE', boxX + 12, boxY + 10);
@@ -564,29 +653,39 @@ async function generateInvoicePdf(userId, id) {
             doc.text(`Échéance : ${fmtDate(inv.dueDate)}`);
             doc.text(`Client : ${clientName}`);
             doc.text(`Email : ${c.email}`);
-            // Badge statut
             try {
                 const pill = ` ${inv.status} `;
                 const pw = doc.widthOfString(pill) + 16;
                 const ph = 18;
                 const px = boxX + boxW - pw - 12;
                 const py = boxY + 5;
-                const color = inv.status === 'PAID' ? THEME.success :
-                    inv.status === 'OVERDUE' ? THEME.danger : THEME.brand;
-                doc.save()
-                    .roundedRect(px, py, pw, ph, 9).fill(color)
-                    .font('Helvetica-Bold').fontSize(10).fillColor(THEME.white)
+                const color = inv.status === 'PAID'
+                    ? THEME.success
+                    : inv.status === 'OVERDUE'
+                        ? THEME.danger
+                        : THEME.brand;
+                doc
+                    .save()
+                    .roundedRect(px, py, pw, ph, 9)
+                    .fill(color)
+                    .font('Helvetica-Bold')
+                    .fontSize(10)
+                    .fillColor(THEME.white)
                     .text(pill, px, py + 5, { width: pw, align: 'center' })
                     .restore();
             }
             catch { }
             doc.moveDown(1.4);
-            // Bloc vendeur (sous le logo)
             const sellerX = MARGIN;
             const sellerY = topY + 58;
             const sellerW = contentW * 0.55;
-            doc.font('Helvetica-Bold').fontSize(11).fillColor(THEME.text)
-                .text(profile?.companyName ?? user?.fullName ?? 'Votre société', sellerX, sellerY, { width: sellerW });
+            doc
+                .font('Helvetica-Bold')
+                .fontSize(11)
+                .fillColor(THEME.text)
+                .text(profile?.companyName ?? user?.fullName ?? 'Votre société', sellerX, sellerY, {
+                width: sellerW,
+            });
             doc.font('Helvetica').fontSize(10).fillColor(THEME.muted);
             const sellerLines = [];
             if (profile?.fullName || user?.fullName)
@@ -610,15 +709,19 @@ async function generateInvoicePdf(userId, id) {
             if (profile?.vatNumber) {
                 doc.text(`N° TVA intracommunautaire: ${profile.vatNumber}`, { width: sellerW });
             }
-            // Tampon PAYÉ en filigrane si payé
             if (inv.status === 'PAID') {
                 const cx = MARGIN + contentW * 0.35, cy = doc.y - 0;
                 try {
-                    doc.save()
+                    doc
+                        .save()
                         .rotate(-12, { origin: [cx, cy] })
-                        .fillColor(THEME.success).fillOpacity(0.08)
-                        .rect(cx - 120, cy - 22, 240, 44).fill()
-                        .fillOpacity(1).font('Helvetica-Bold').fontSize(24)
+                        .fillColor(THEME.success)
+                        .fillOpacity(0.08)
+                        .rect(cx - 120, cy - 22, 240, 44)
+                        .fill()
+                        .fillOpacity(1)
+                        .font('Helvetica-Bold')
+                        .fontSize(24)
                         .fillColor(THEME.success)
                         .text('PAYÉ', cx - 70, cy - 10, { width: 140, align: 'center' })
                         .restore();
@@ -626,9 +729,8 @@ async function generateInvoicePdf(userId, id) {
                 catch { }
             }
         };
-        // ——— Tableau des lignes ————————————————————————————————
         const cols = [
-            { label: 'Description', w: Math.floor(contentW * 0.50), align: 'left' },
+            { label: 'Description', w: Math.floor(contentW * 0.5), align: 'left' },
             { label: 'Qté', w: 48, align: 'left' },
             { label: 'PU HT', w: 48, align: 'left' },
             { label: 'TVA %', w: 48, align: 'left' },
@@ -639,11 +741,16 @@ async function generateInvoicePdf(userId, id) {
         const colX = (i) => x0 + cols.slice(0, i).reduce((s, c) => s + c.w + gap, 0);
         const drawTableHead = () => {
             const h = 26;
-            doc.save()
-                .rect(MARGIN, doc.y, contentW, h).fill(THEME.brandLight)
+            doc
+                .save()
+                .rect(MARGIN, doc.y, contentW, h)
+                .fill(THEME.brandLight)
                 .restore()
-                .strokeColor(THEME.line).lineWidth(0.5)
-                .moveTo(MARGIN, doc.y + h).lineTo(pageW - MARGIN, doc.y + h).stroke();
+                .strokeColor(THEME.line)
+                .lineWidth(0.5)
+                .moveTo(MARGIN, doc.y + h)
+                .lineTo(pageW - MARGIN, doc.y + h)
+                .stroke();
             doc.font('Helvetica-Bold').fontSize(10).fillColor(THEME.brand);
             cols.forEach((c, i) => {
                 doc.text(c.label, colX(i), doc.y + 8, { width: c.w, align: c.align });
@@ -662,7 +769,11 @@ async function generateInvoicePdf(userId, id) {
                 const lineH = Math.max(20, descH + 8);
                 need(lineH + 6, true);
                 if (idx % 2 === 1) {
-                    doc.save().rect(MARGIN, doc.y - 2, contentW, lineH).fill(THEME.zebra).restore();
+                    doc
+                        .save()
+                        .rect(MARGIN, doc.y - 2, contentW, lineH)
+                        .fill(THEME.zebra)
+                        .restore();
                 }
                 doc.fillColor(THEME.text);
                 doc.text(desc, colX(0), doc.y + 4, { width: cols[0].w, align: 'left' });
@@ -670,25 +781,32 @@ async function generateInvoicePdf(userId, id) {
                 doc.text(money(unit), colX(2), doc.y + 4, { width: cols[2].w, align: 'right' });
                 doc.text(tax.toFixed(2), colX(3), doc.y + 4, { width: cols[3].w, align: 'right' });
                 doc.text(money(tot), colX(4), doc.y + 4, { width: cols[4].w, align: 'right' });
-                doc.strokeColor(THEME.line).lineWidth(0.5)
-                    .moveTo(MARGIN, doc.y + lineH).lineTo(pageW - MARGIN, doc.y + lineH).stroke();
+                doc
+                    .strokeColor(THEME.line)
+                    .lineWidth(0.5)
+                    .moveTo(MARGIN, doc.y + lineH)
+                    .lineTo(pageW - MARGIN, doc.y + lineH)
+                    .stroke();
                 doc.y += lineH;
             });
             doc.moveDown(0.4);
         };
-        // ——— Totaux + Règlement ————————————————————————————————
         const drawTotals = () => {
             need(140);
             const boxW = 300;
             const boxX = pageW - MARGIN - boxW;
             const startY = doc.y + 6;
-            doc.save()
+            doc
+                .save()
                 .roundedRect(boxX, startY, boxW, 300, 10)
                 .fillAndStroke(THEME.white, THEME.line)
                 .restore();
             const row = (labelTxt, valTxt, bold = false) => {
                 const lh = 22;
-                doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(THEME.text);
+                doc
+                    .font(bold ? 'Helvetica-Bold' : 'Helvetica')
+                    .fontSize(10)
+                    .fillColor(THEME.text);
                 doc.text(labelTxt, boxX + 10, doc.y + 8, { width: boxW - 120, align: 'left' });
                 doc.text(valTxt, boxX + boxW - 10 - 110, doc.y + 8, { width: 110, align: 'right' });
                 doc.y += lh;
@@ -699,28 +817,33 @@ async function generateInvoicePdf(userId, id) {
             row('Total', money(Number(inv.total)), true);
             row('Déjà payé', money(inv.paidAmount));
             row('Restant dû', money(inv.balanceDue), true);
-            // Badge d’échéance si reste à payer
             if (balance > 0) {
                 const badge = `À payer avant le ${fmtDate(inv.dueDate)}`;
                 const bw = doc.widthOfString(badge) + 14;
                 const by = startY - 18;
                 const bx = boxX + boxW - bw;
-                doc.save()
+                doc
+                    .save()
                     .roundedRect(bx, by, bw, 16, 6)
                     .fillAndStroke(THEME.brandLight, THEME.line)
-                    .font('Helvetica').fontSize(9).fillColor(THEME.brand)
+                    .font('Helvetica')
+                    .fontSize(9)
+                    .fillColor(THEME.brand)
                     .text(badge, bx + 7, by + 3)
                     .restore();
             }
-            // Panneau Règlement (gauche)
             const payX = MARGIN;
             const payW = contentW - boxW - 16;
             const payH = 132;
-            doc.save()
+            doc
+                .save()
                 .roundedRect(payX, startY, payW, payH, 10)
                 .fillAndStroke(THEME.headBg, THEME.line)
                 .restore();
-            doc.font('Helvetica-Bold').fontSize(11).fillColor(THEME.text)
+            doc
+                .font('Helvetica-Bold')
+                .fontSize(11)
+                .fillColor(THEME.text)
                 .text('Règlement', payX + 12, startY + 10);
             doc.font('Helvetica').fontSize(10).fillColor(THEME.text);
             const lines = [];
@@ -745,18 +868,15 @@ async function generateInvoicePdf(userId, id) {
             doc.y = Math.max(doc.y, startY + payH);
             doc.moveDown(1);
         };
-        // ——— Notes / mentions ————————————————————————————————
         const drawNotes = async () => {
             const block = (title, text) => {
                 if (!text)
                     return;
                 label(title);
                 doc.moveDown(0.2);
-                doc.font('Helvetica').fillColor(THEME.text).fontSize(10)
-                    .text(text, { width: contentW });
+                doc.font('Helvetica').fillColor(THEME.text).fontSize(10).text(text, { width: contentW });
                 doc.moveDown(0.8);
             };
-            // Mention TVA selon régime à la date d'émission
             try {
                 const ctx = await (0, tax_services_js_1.getVatContext)(Number(inv.ownerId), inv.issueDate);
                 if (ctx.regime === 'FRANCHISE') {
@@ -767,19 +887,23 @@ async function generateInvoicePdf(userId, id) {
             block('Notes', inv.notes);
             block('Conditions', inv.terms);
         };
-        // ——— Footer discret et STABLE (pas de pageAdded, pas de dépassement) ———
         const drawFooter = () => {
-            const y = pageH - MARGIN - 14; // toujours au-dessus de la marge
+            const y = pageH - MARGIN - 14;
             const left = [profile?.website, profile?.email, profile?.phone].filter(Boolean).join('  •  ');
-            const prevY = doc.y; // ne pas polluer le flux
-            doc.save()
-                .fontSize(9).fillColor(THEME.muted)
+            const prevY = doc.y;
+            doc
+                .save()
+                .fontSize(9)
+                .fillColor(THEME.muted)
                 .text(left, MARGIN, y, { width: contentW * 0.6, align: 'left', lineBreak: false })
-                .text(`Page ${doc.page.number}`, MARGIN + contentW * 0.6, y, { width: contentW * 0.4, align: 'right', lineBreak: false })
+                .text(`Page ${doc.page.number}`, MARGIN + contentW * 0.6, y, {
+                width: contentW * 0.4,
+                align: 'right',
+                lineBreak: false,
+            })
                 .restore();
             doc.y = prevY;
         };
-        // ——— Orchestration ———————————————————————————————————————
         drawHeader();
         doc.moveDown(0.4);
         drawTableHead();

@@ -20,6 +20,11 @@ function toPublic(c) {
         ownerId: c.ownerId == null ? null : Number(c.ownerId),
     };
 }
+function ciContains(q) {
+    const url = process.env.DATABASE_URL ?? '';
+    const isPg = /^postgres(ql)?:/i.test(url);
+    return isPg ? { contains: q, mode: 'insensitive' } : { contains: q };
+}
 async function listClients(userId, opts) {
     const uid = BigInt(userId);
     const { q, page, pageSize } = opts;
@@ -27,9 +32,9 @@ async function listClients(userId, opts) {
     const where = { ownerId: uid };
     if (q && q.length > 0) {
         where.OR = [
-            { fullName: { contains: q, mode: 'insensitive' } },
-            { email: { contains: q, mode: 'insensitive' } },
-            { company: { contains: q, mode: 'insensitive' } },
+            { fullName: ciContains(q) },
+            { email: ciContains(q) },
+            { company: ciContains(q) },
         ];
     }
     const [items, total] = await Promise.all([

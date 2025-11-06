@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifyJwt } from '../lib/jwt.js';
 import { env } from '../config/env.js';
+import { setUserId } from '../lib/als.js';
 
 export interface AuthRequest extends Request {
   user?: { id: number };
@@ -22,6 +23,8 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   try {
     const payload = await verifyJwt<{ sub: number }>(token, env.JWT_ACCESS_SECRET);
     req.user = { id: Number(payload.sub) };
+    // Set ALS userId for downstream hooks (e.g., Prisma write events)
+    try { setUserId(req.user.id); } catch {}
     // Attach user context for downstream logging
     res.locals.auth = { result: 'allow', userId: req.user.id, requestId: (req as any).id };
     next();

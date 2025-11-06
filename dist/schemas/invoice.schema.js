@@ -51,5 +51,5 @@ exports.listInvoicesQuerySchema = zod_1.z.object({
         .optional()
         .transform((v) => (v === undefined ? undefined : v === 'true')),
     page: zod_1.z.coerce.number().int().min(1).optional().default(1),
-    pageSize: zod_1.z.coerce.number().int().min(1).max(100).optional().default(20),
+    pageSize: zod_1.z.coerce.number().int().min(1).max(200).optional().default(20),
 });

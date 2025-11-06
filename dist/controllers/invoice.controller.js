@@ -13,6 +13,7 @@ exports.markAsSent = markAsSent;
 exports.downloadPdf = downloadPdf;
 exports.summaryForClient = summaryForClient;
 const logger_js_1 = require("../lib/logger.js");
+const audit_js_1 = require("../lib/audit.js");
 const invoice_schema_js_1 = require("../schemas/invoice.schema.js");
 const invoice_services_js_1 = require("../services/invoice.services.js");
 async function listAll(req, res) {
@@ -33,7 +34,8 @@ async function listForClient(req, res) {
 async function createForClient(req, res) {
     const { clientId } = invoice_schema_js_1.clientIdParamSchema.parse(req.params);
     const input = invoice_schema_js_1.createInvoiceSchema.parse(req.body);
-    const out = await (0, invoice_services_js_1.createInvoice)(req.user.id, clientId, input);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    const out = await (0, invoice_services_js_1.createInvoice)(req.user.id, clientId, input, audit);
     res.status(201).json(out);
 }
 async function getOne(req, res) {
@@ -44,30 +46,35 @@ async function getOne(req, res) {
 async function updateOne(req, res) {
     const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
     const input = invoice_schema_js_1.updateInvoiceSchema.parse(req.body);
-    const out = await (0, invoice_services_js_1.updateInvoice)(req.user.id, id, input);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    const out = await (0, invoice_services_js_1.updateInvoice)(req.user.id, id, input, audit);
     res.json(out);
 }
 async function remove(req, res) {
     const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
-    await (0, invoice_services_js_1.deleteInvoice)(req.user.id, id);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    await (0, invoice_services_js_1.deleteInvoice)(req.user.id, id, audit);
     res.status(204).send();
 }
 async function pay(req, res) {
     const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
     const input = invoice_schema_js_1.addPaymentSchema.parse(req.body);
-    const out = await (0, invoice_services_js_1.addPayment)(req.user.id, id, input);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    const out = await (0, invoice_services_js_1.addPayment)(req.user.id, id, input, audit);
     res.json(out);
 }
 async function unpay(req, res) {
     const { id, paymentId } = { id: Number(req.params.id), paymentId: Number(req.params.paymentId) };
     if (!Number.isFinite(paymentId) || paymentId <= 0)
         throw Object.assign(new Error('paymentId invalide'), { status: 400 });
-    await (0, invoice_services_js_1.removePayment)(req.user.id, id, paymentId);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    await (0, invoice_services_js_1.removePayment)(req.user.id, id, paymentId, audit);
     res.status(204).send();
 }
 async function markAsSent(req, res) {
     const { id } = invoice_schema_js_1.invoiceIdParamSchema.parse(req.params);
-    const out = await (0, invoice_services_js_1.markSent)(req.user.id, id);
+    const audit = (0, audit_js_1.buildAuditContext)(req);
+    const out = await (0, invoice_services_js_1.markSent)(req.user.id, id, audit);
     res.json(out);
 }
 async function downloadPdf(req, res, next) {
@@ -77,6 +84,17 @@ async function downloadPdf(req, res, next) {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
         res.send(buf);
+        // Audit: PDF download
+        const audit = (0, audit_js_1.buildAuditContext)(req);
+        await (0, audit_js_1.auditLog)({
+            actorUserId: req.user.id,
+            entityType: 'invoice',
+            entityId: id,
+            action: 'pdf_download',
+            ip: audit.ip ?? null,
+            userAgent: audit.userAgent ?? null,
+            metadata: { requestId: audit.requestId, reason: audit.reason ?? null },
+        });
     }
     catch (e) {
         logger_js_1.logger.error({ err: e, reqId: req.headers['x-request-id'] }, 'generateInvoicePdf failed');
