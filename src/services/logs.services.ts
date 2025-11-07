@@ -10,6 +10,7 @@ export type ActivityLogPublic = {
   action: string;
   ip?: string | null;
   userAgent?: string | null;
+  method?: string | null;
   metadata: unknown;
   createdAt: Date;
 };
@@ -23,6 +24,7 @@ function toPublic(row: any): ActivityLogPublic {
     action: row.action,
     ip: row.ip ?? null,
     userAgent: row.userAgent ?? null,
+    method: row.method ?? null,
     metadata: row.metadata,
     createdAt: row.createdAt,
   };
@@ -72,7 +74,7 @@ export async function listLogsByEntity(entityType: string, entityId: number, opt
 export async function listLogsByRequestId(requestId: string, opts: { page: number; pageSize: number }) {
   const offset = (opts.page - 1) * opts.pageSize;
   const rows = await prisma.$queryRaw<Array<any>>`
-    SELECT id, actorUserId, entityType, entityId, action, ip, userAgent, metadata, createdAt
+    SELECT id, actorUserId, entityType, entityId, action, ip, userAgent, method, metadata, createdAt
     FROM ActivityLog
     WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.requestId')) = ${requestId}
     ORDER BY id DESC
@@ -108,7 +110,7 @@ export async function listHttpLogs(opts: {
     params.push(requestId);
   }
   if (method) {
-    conds.push("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.method')) = ?");
+    conds.push("method = ?");
     params.push(method);
   }
   if (typeof statusCode === 'number') {
@@ -130,7 +132,7 @@ export async function listHttpLogs(opts: {
   const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
   const rows = await prisma.$queryRawUnsafe<Array<any>>(
-    `SELECT id, actorUserId, entityType, entityId, action, ip, userAgent, metadata, createdAt
+    `SELECT id, actorUserId, entityType, entityId, action, ip, userAgent, method, metadata, createdAt
      FROM ActivityLog
      ${whereSql}
      ORDER BY id DESC
@@ -146,4 +148,3 @@ export async function listHttpLogs(opts: {
   const total = Number(countRows[0]?.c ?? 0);
   return { items: rows.map(toPublic), total, page, pageSize };
 }
-

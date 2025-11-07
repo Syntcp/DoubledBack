@@ -296,6 +296,7 @@ model ActivityLog {
   action      String   @db.VarChar(64) // "create","update","delete","login","logout"
   ip          String?  @db.VarChar(64)
   userAgent   String?
+  method      String?  @db.VarChar(10)
   metadata    Json
   createdAt   DateTime @default(now())
 

@@ -17,12 +17,18 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
   const start = process.hrtime.bigint();
   const id = (req as any).id as string | undefined;
   const url = (req as any).originalUrl || req.url;
+  const path = typeof url === 'string' ? url.split('?')[0] : '';
   const ip = (req as any).ip || (req.socket && (req.socket as any).remoteAddress);
   const ua = req.headers['user-agent'];
   const reasonHdr = req.headers['x-audit-reason'];
   if (typeof reasonHdr === 'string') (res as any).locals = { ...(res as any).locals, auditReason: reasonHdr };
 
-  logger.info({ id, method: req.method, url, ip, userAgent: ua }, 'Incoming request');
+  // Skip logging for GET requests under /api/v1/*
+  const isV1Get = req.method === 'GET' && /^\/api\/v1(?:\/|$)/.test(path);
+
+  if (!isV1Get) {
+    logger.info({ id, method: req.method, url, ip, userAgent: ua }, 'Incoming request');
+  }
 
   res.on('finish', () => {
     const end = process.hrtime.bigint();
@@ -45,46 +51,49 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
       base.auth = auth;
     }
 
-    // Use warn level for 4xx/5xx to stand out.
-    if (res.statusCode >= 400) {
-      logger.warn(base, 'Request completed with error');
-    } else {
-      logger.info(base, 'Request completed');
+    if (!isV1Get) {
+      // Use warn level for 4xx/5xx to stand out.
+      if (res.statusCode >= 400) {
+        logger.warn(base, 'Request completed with error');
+      } else {
+        logger.info(base, 'Request completed');
+      }
+
+      // Persist request log (fire-and-forget)
+      const meta = {
+        requestId: id,
+        durationMs: Math.round(ms),
+        statusCode: res.statusCode,
+        method: req.method,
+        url,
+        query: redactSensitive(req.query),
+        params: redactSensitive((req as any).params || {}),
+        body: redactSensitive(req.body),
+        headers: redactSensitive({
+          ...req.headers,
+          authorization: undefined,
+          cookie: undefined,
+        }),
+        contentLength: typeof contentLength === 'string' ? Number(contentLength) : contentLength,
+        auth,
+        reason: (res as any).locals?.auditReason ?? null,
+      } as Record<string, unknown>;
+
+      void prisma.activityLog
+        .create({
+          data: {
+            actorUserId: userId != null ? BigInt(userId) : null,
+            entityType: 'http_request',
+            entityId: null,
+            action: 'request',
+            ip: (ip as any) ?? null,
+            userAgent: (ua as any) ?? null,
+            method: req.method as any,
+            metadata: meta as any,
+          } as any,
+        })
+        .catch(() => {});
     }
-
-    // Persist request log (fire-and-forget)
-    const meta = {
-      requestId: id,
-      durationMs: Math.round(ms),
-      statusCode: res.statusCode,
-      method: req.method,
-      url,
-      query: redactSensitive(req.query),
-      params: redactSensitive((req as any).params || {}),
-      body: redactSensitive(req.body),
-      headers: redactSensitive({
-        ...req.headers,
-        authorization: undefined,
-        cookie: undefined,
-      }),
-      contentLength: typeof contentLength === 'string' ? Number(contentLength) : contentLength,
-      auth,
-      reason: (res as any).locals?.auditReason ?? null,
-    } as Record<string, unknown>;
-
-    void prisma.activityLog
-      .create({
-        data: {
-          actorUserId: userId != null ? BigInt(userId) : null,
-          entityType: 'http_request',
-          entityId: null,
-          action: 'request',
-          ip: (ip as any) ?? null,
-          userAgent: (ua as any) ?? null,
-          metadata: meta as any,
-        },
-      })
-      .catch(() => {});
 
     // Emit SSE mutation event for successful write requests
     try {
