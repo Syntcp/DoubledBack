@@ -9,6 +9,8 @@ import profile from './profile.routes.js';
 import expenses from './expenses.routes.js';
 import accounting from './accounting.routes.js';
 import logs from './logs.routes.js';
+import websites from './websites.routes.js';
+import workflow from './workflow.routes.js';
 
 const v1 = Router();
 v1.use(health);
@@ -21,5 +23,7 @@ v1.use(profile);
 v1.use(expenses);
 v1.use(accounting);
 v1.use(logs);
+v1.use(websites);
+v1.use(workflow);
 
 export default v1;

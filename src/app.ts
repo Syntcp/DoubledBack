@@ -14,11 +14,9 @@ export function createApp() {
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
   app.use(helmet());
-  // Compression disabled for SSE and enabled for others
   app.use(
     compression({
       filter: (req, res) => {
-        // Skip compression for Server-Sent Events
         const type = res.getHeader('Content-Type');
         if (type && String(type).includes('text/event-stream')) return false;
         if ((req as any).originalUrl?.includes('/api/v1/events')) return false;
@@ -28,9 +26,7 @@ export function createApp() {
   );
   app.use(cors({ origin: true, credentials: true }));
 
-  // Attach a request id and basic logs (homemade instead of pino-http)
   app.use(requestId);
-  // Initialize AsyncLocalStorage request context
   app.use((req, _res, next) => {
     const url = (req as any).originalUrl || req.url;
     const id = (req as any).id as string | undefined;
@@ -50,7 +46,6 @@ export function createApp() {
 
   app.use((_req, res) => res.status(404).json({ error: 'NotFound' }));
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const status = err?.status || 500;
     const reqId = (req.headers['x-request-id'] as string) || (res.getHeader('x-request-id') as string) || '';
@@ -67,7 +62,6 @@ export function createApp() {
     if (reqId) body.requestId = reqId;
     if (!isProd && err?.stack) body.stack = String(err.stack);
 
-    // If headers already sent (e.g., SSE stream), don't attempt to write again
     if (res.headersSent) {
       try { return res.end(); } catch { return; }
     }
