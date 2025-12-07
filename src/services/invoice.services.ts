@@ -658,8 +658,6 @@ function formatMoney(n: number, currency: any = 'EUR') {
   }
 }
 
-import { chromium } from 'playwright'
-
 export async function generateInvoicePdf(userId: number, id: number): Promise<Buffer> {
   const inv = await prisma.invoice.findFirst({
     where: { id: BigInt(id), ownerId: BigInt(userId) },
